@@ -359,7 +359,7 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
 
         if r.get('buy_val', 0) > 0 or r.get('buy_qty_matched', 0) > 0:
             tx_list.append({
-                'Mã giao dịch': f"{r['shl']}_BUY",
+                'Mã giao dịch': r['shl'],
                 'Mã khách hàng': r['sub_acc'],
                 'Mã người quản lý': mgr_code,
                 'Giá trị giao dịch': r['buy_val'],
@@ -374,7 +374,7 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
             
         if r.get('sell_val', 0) > 0 or r.get('sell_qty_matched', 0) > 0:
             tx_list.append({
-                'Mã giao dịch': f"{r['shl']}_SELL",
+                'Mã giao dịch': r['shl'],
                 'Mã khách hàng': r['sub_acc'],
                 'Mã người quản lý': mgr_code,
                 'Giá trị giao dịch': r['sell_val'],
@@ -387,19 +387,23 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
                 'Giá giao dịch': r.get('sell_price_avg', 0.0)
             })
 
-    # PDF transactions
+    # PDF transactions (generate sequential ID: sub_acc + symbol + index)
+    pdf_seq = len(tx_list)  # Continue sequence after excel transactions
     for idx, r in enumerate(pdf_tx_list, start=1):
         mgr_name = r.get('manager', 'Lê Minh Hiếu')
         mgr_code = 'CTV0166' if "Lê Minh Hiếu" in mgr_name else ("NQL_" + re.sub(r'\s+', '_', mgr_name.upper()))
+        sub_acc = r['sub_acc']
+        symbol = r['symbol']
         
         if r.get('buy_val', 0) > 0:
+            pdf_seq += 1
             tx_list.append({
-                'Mã giao dịch': f"PDF_TX_{r['sub_acc']}_BUY_{idx}",
-                'Mã khách hàng': r['sub_acc'],
+                'Mã giao dịch': f"{sub_acc}{symbol}{str(pdf_seq).zfill(4)}",
+                'Mã khách hàng': sub_acc,
                 'Mã người quản lý': mgr_code,
                 'Giá trị giao dịch': r['buy_val'],
                 'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 1,
-                'Mã CP': r['symbol'],
+                'Mã CP': symbol,
                 'Thuế bán': 0.0,
                 'Ngày giao dịch': '31/07/2026',
                 'Phí net': r['buy_val'] * 0.00075,
@@ -408,13 +412,14 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
             })
             
         if r.get('sell_val', 0) > 0:
+            pdf_seq += 1
             tx_list.append({
-                'Mã giao dịch': f"PDF_TX_{r['sub_acc']}_SELL_{idx}",
-                'Mã khách hàng': r['sub_acc'],
+                'Mã giao dịch': f"{sub_acc}{symbol}{str(pdf_seq).zfill(4)}",
+                'Mã khách hàng': sub_acc,
                 'Mã người quản lý': mgr_code,
                 'Giá trị giao dịch': r['sell_val'],
                 'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 2,
-                'Mã CP': r['symbol'],
+                'Mã CP': symbol,
                 'Thuế bán': r['sell_val'] * 0.001,
                 'Ngày giao dịch': '31/07/2026',
                 'Phí net': r['sell_val'] * 0.00075,
