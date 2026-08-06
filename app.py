@@ -269,7 +269,12 @@ with tab3:
 with tab4:
     st.subheader("📐 Sơ đồ Schema Relational Data Model")
     if os.path.exists(DEFAULT_IMG_PATH):
-        st.image(DEFAULT_IMG_PATH, caption="Relational Database Model Schema (Data Model.jpg)", use_column_width=True)
+        try:
+            st.image(DEFAULT_IMG_PATH, caption="Relational Database Model Schema (Data Model.jpg)", use_container_width=True)
+        except Exception:
+            st.image(DEFAULT_IMG_PATH, caption="Relational Database Model Schema (Data Model.jpg)")
+    else:
+        st.info("Sơ đồ Data Model.jpg")
 
 # TAB 5: Deployment Guide
 with tab5:
