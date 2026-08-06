@@ -5,6 +5,76 @@ import openpyxl
 import pdfplumber
 import pandas as pd
 
+# Mapping between sheet names in PBSV-style multi-sheet Excel → canonical table names
+PBSV_SHEET_MAP = {
+    'CoPhieu':          'Co_phieu',
+    'CongTyChungKhoan': 'Cong_ty_chung_khoan',
+    'NguoiQuanLy':      'Nguoi_quan_ly',
+    'ChinhSach':        'Chinh_sach',
+    'PhanLoaiKhachHang':'Phan_loai_khach_hang',
+    'NhomKhachHang':    'Nhom_khach_hang',
+    'KhachHang':        'Khach_hang',
+    'GiaoDich':         'Giao_dich',
+    'PhiGiaHan':        'Phi_gia_han',
+    'BaoCaoThuLai':     'Bao_cao_thu_lai',
+}
+
+def is_multi_sheet_data_model(file_bytes_or_path):
+    """
+    Returns True if the uploaded xlsx file is a PBSV-style multi-sheet Data Model workbook.
+    Detection: at least 4 of the known sheet names match PBSV_SHEET_MAP keys.
+    """
+    try:
+        if isinstance(file_bytes_or_path, bytes):
+            wb = openpyxl.load_workbook(io.BytesIO(file_bytes_or_path), data_only=True)
+        else:
+            wb = openpyxl.load_workbook(file_bytes_or_path, data_only=True)
+        matches = sum(1 for s in wb.sheetnames if s in PBSV_SHEET_MAP)
+        return matches >= 4
+    except Exception:
+        return False
+
+def parse_multi_sheet_excel(file_bytes_or_path, filename=""):
+    """
+    Reads a PBSV-style multi-sheet Data Model workbook and returns a dictionary
+    mapping canonical table names -> pandas DataFrames, ready to use as db_tables.
+    """
+    if isinstance(file_bytes_or_path, bytes):
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes_or_path), data_only=True)
+    else:
+        wb = openpyxl.load_workbook(file_bytes_or_path, data_only=True)
+
+    db_tables = {}
+    for sheet_name, canonical_name in PBSV_SHEET_MAP.items():
+        if sheet_name not in wb.sheetnames:
+            continue
+        ws = wb[sheet_name]
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            continue
+        # First non-null row is the header
+        header = [str(c).strip() if c is not None else f"Col{i}" for i, c in enumerate(rows[0])]
+        data_rows = []
+        for row in rows[1:]:
+            # Skip fully empty rows
+            if all(v is None for v in row):
+                continue
+            data_rows.append(list(row))
+        df = pd.DataFrame(data_rows, columns=header)
+        # Convert datetime objects to string for clean display
+        for col in df.columns:
+            if df[col].dtype == object:
+                df[col] = df[col].apply(lambda v: v.strftime('%d/%m/%Y') if hasattr(v, 'strftime') else v)
+        db_tables[canonical_name] = df
+
+    # Ensure all 10 tables exist (fill missing with empty frames)
+    for canonical_name in PBSV_SHEET_MAP.values():
+        if canonical_name not in db_tables:
+            db_tables[canonical_name] = pd.DataFrame()
+
+    return db_tables
+
+
 def parse_excel_data(file_bytes_or_path, filename=""):
     """
     Parses any XLS or XLSX transaction report dynamically.
