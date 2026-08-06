@@ -530,35 +530,158 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
 
 def build_master_flat_table(db_tables):
     """
-    Creates a unified master flat dataset combining all attributes from Data Model.jpg
+    Creates a unified master flat dataset combining all attributes from Data Model.
+    Handles both ETL-generated tables and PBSV multi-sheet workbook column naming conventions.
+    Only includes columns that actually have data — never fills in values from wrong columns.
     """
-    df_gd = db_tables.get('Giao_dich', pd.DataFrame())
-    df_kh = db_tables.get('Khach_hang', pd.DataFrame())
-    df_nql = db_tables.get('Nguoi_quan_ly', pd.DataFrame())
-    df_co = db_tables.get('Cong_ty_chung_khoan', pd.DataFrame())
-    df_cp = db_tables.get('Co_phieu', pd.DataFrame())
+    df_gd  = db_tables.get('Giao_dich', pd.DataFrame()).copy()
+    df_kh  = db_tables.get('Khach_hang', pd.DataFrame()).copy()
+    df_nql = db_tables.get('Nguoi_quan_ly', pd.DataFrame()).copy()
+    df_co  = db_tables.get('Cong_ty_chung_khoan', pd.DataFrame()).copy()
+    df_cp  = db_tables.get('Co_phieu', pd.DataFrame()).copy()
 
     if df_gd.empty:
         return pd.DataFrame()
 
-    m1 = pd.merge(df_gd, df_kh, on='Mã khách hàng', how='left', suffixes=('', '_kh'))
-    m2 = pd.merge(m1, df_nql, left_on='Mã người quản lý', right_on='Mã người quản lý/CTV', how='left', suffixes=('', '_nql'))
-    m3 = pd.merge(m2, df_co, left_on='Mã công ty chứng khoán', right_on='ID', how='left', suffixes=('', '_ctck'))
-    master_df = pd.merge(m3, df_cp, left_on='Mã CP', right_on='Mã cổ phiếu', how='left', suffixes=('', '_cp'))
+    # ── Detect column naming convention ──────────────────────────────
+    # ETL-generated:   'Mã khách hàng', 'Mã người quản lý', 'Mã CP', ...
+    # PBSV multi-sheet: 'Mã KH (FK)', 'Mã người QL (FK)', 'Mã CP (FK)', ...
+    is_pbsv = 'Mã KH (FK)' in df_gd.columns
 
-    # Order columns logically matching Data Model
-    target_columns = [
+    # ── Rename PBSV columns → canonical names for joining ─────────────
+    if is_pbsv:
+        gd_rename = {
+            'Mã KH (FK)':        'Mã khách hàng',
+            'Tên KH':            'Tên khách hàng_gd',  # keep separately
+            'Mã người QL (FK)':  '_mgr_fk',
+            'Tên người QL':      'Tên người quản lý_gd',
+            'Mua/Bán (1:Mua, 2:Bán)': 'Giao dịch Mua/Bán (1: Mua, 2: Bán)',
+            'Mã CP (FK)':        'Mã CP',
+            'Tên DN (CP)':       'Tên doanh nghiệp_gd',
+            'Ngày giao dịch':    'Ngày giao dịch',
+            'Khối lượng GD':     'Khối lượng giao dịch',
+            'Giá GD':            'Giá giao dịch',
+        }
+        df_gd.rename(columns={k: v for k, v in gd_rename.items() if k in df_gd.columns}, inplace=True)
+
+        kh_rename = {
+            'Mã KH':                         'Mã khách hàng',
+            'Mã Cty CK (FK)':                'Mã công ty chứng khoán',
+            'Mã loại KH (FK)':               'Mã loại khách hàng',
+            'Mã nhóm KH (FK)':               'Mã nhóm khách hàng',
+            'Mã người QL (FK)':              '_kh_mgr_fk',
+            'Tình trạng hoạt động (1/0)':   'Tình trạng hoạt động (1: có, 0: không)',
+        }
+        df_kh.rename(columns={k: v for k, v in kh_rename.items() if k in df_kh.columns}, inplace=True)
+
+        nql_rename = {
+            'Mã người QL/CTV': 'Mã người quản lý/CTV',
+            'Tên người QL/CTV': 'Tên người quản lý/CTV',
+            'Loại (Quản lý/CTV)': 'Loại người quản lý (quản lý/CTV)',
+        }
+        df_nql.rename(columns={k: v for k, v in nql_rename.items() if k in df_nql.columns}, inplace=True)
+
+        cp_rename = {
+            'Mã cổ phiếu': 'Mã cổ phiếu',
+            'Giá mở cửa (gần nhất)': 'Giá mở cửa ngày giao dịch gần nhất',
+            'Giá đóng cửa (gần nhất)': 'Giá đóng cửa ngày giao dịch gần nhất',
+        }
+        df_cp.rename(columns={k: v for k, v in cp_rename.items() if k in df_cp.columns}, inplace=True)
+
+        # Build Mã người quản lý in Giao_dich from NQL lookup
+        if '_mgr_fk' in df_gd.columns and 'ID' in df_nql.columns:
+            nql_lookup = df_nql[['ID', 'Mã người quản lý/CTV']].copy()
+            nql_lookup['ID'] = pd.to_numeric(nql_lookup['ID'], errors='coerce')
+            df_gd['_mgr_fk'] = pd.to_numeric(df_gd['_mgr_fk'], errors='coerce')
+            df_gd = pd.merge(df_gd, nql_lookup, left_on='_mgr_fk', right_on='ID', how='left')
+            df_gd.rename(columns={'Mã người quản lý/CTV': 'Mã người quản lý'}, inplace=True)
+            df_gd.drop(columns=['_mgr_fk', 'ID'], errors='ignore', inplace=True)
+    else:
+        # ETL format: Mã người quản lý is already in df_gd directly
+        pass
+
+    # ── Merge Giao_dich ← Khach_hang ─────────────────────────────────
+    if 'Mã khách hàng' in df_gd.columns and 'Mã khách hàng' in df_kh.columns:
+        # Drop duplicate lookup columns from KhachHang that came embedded in GiaoDich
+        kh_cols_to_keep = [c for c in df_kh.columns
+                           if c not in df_gd.columns or c == 'Mã khách hàng']
+        master_df = pd.merge(df_gd, df_kh[kh_cols_to_keep], on='Mã khách hàng', how='left')
+    else:
+        master_df = df_gd.copy()
+
+    # ── Merge ← Nguoi_quan_ly ────────────────────────────────────────
+    if 'Mã người quản lý' in master_df.columns and 'Mã người quản lý/CTV' in df_nql.columns:
+        nql_cols = [c for c in df_nql.columns
+                    if c not in master_df.columns or c == 'Mã người quản lý/CTV']
+        master_df = pd.merge(master_df, df_nql[nql_cols],
+                             left_on='Mã người quản lý', right_on='Mã người quản lý/CTV',
+                             how='left', suffixes=('', '_nql'))
+
+    # ── Merge ← Cong_ty_chung_khoan ─────────────────────────────────
+    co_id_col = None
+    if 'Mã công ty chứng khoán' in master_df.columns:
+        co_id_col = 'Mã công ty chứng khoán'
+    if co_id_col and 'ID' in df_co.columns:
+        co_cols = [c for c in df_co.columns
+                   if c not in master_df.columns or c == 'ID']
+        master_df = pd.merge(master_df, df_co[co_cols],
+                             left_on=co_id_col, right_on='ID',
+                             how='left', suffixes=('', '_co'))
+
+    # ── Merge ← Co_phieu ─────────────────────────────────────────────
+    if 'Mã CP' in master_df.columns and 'Mã cổ phiếu' in df_cp.columns:
+        cp_cols = [c for c in df_cp.columns
+                   if c not in master_df.columns or c == 'Mã cổ phiếu']
+        master_df = pd.merge(master_df, df_cp[cp_cols],
+                             left_on='Mã CP', right_on='Mã cổ phiếu',
+                             how='left', suffixes=('', '_cp'))
+
+    # ── Drop internal helper / duplicate columns ──────────────────────
+    # Columns that are join artifacts or explicit duplicates
+    always_drop = {
+        '_mgr_fk', '_kh_mgr_fk',
+        'Tên Cty CK', 'Tên công ty CK', 'MucLuc',
+        'ID',                                       # numeric PK used only for join
+        'Mã cổ phiếu',                              # duplicate of 'Mã CP'
+        'Mã Cty CK (FK)',                           # raw FK kept after rename
+        'Mã công ty chứng khoán',                   # numeric FK, Mã định danh công ty is cleaner
+        'Tên người QL',                             # duplicate of 'Tên người quản lý/CTV'
+        'Tên loại KH',                              # short alias, Mã loại khách hàng is sufficient
+        'Tên nhóm KH',                              # short alias, Mã nhóm khách hàng is sufficient
+        'Tình trạng hoạt động (1:có, 0:không)',     # already renamed to canonical
+        'Mã người quản lý',                         # keep only Mã người quản lý/CTV (same value)
+    }
+    drop_cols = [c for c in master_df.columns
+                 if c.endswith(('_gd', '_kh', '_nql', '_co', '_cp')) or c in always_drop]
+    master_df.drop(columns=drop_cols, errors='ignore', inplace=True)
+    # Drop pandas merge suffix variants (_x, _y)
+    dup_cols = [c for c in master_df.columns if c.endswith('_x') or c.endswith('_y')]
+    master_df.drop(columns=dup_cols, errors='ignore', inplace=True)
+    # Drop columns that are entirely null/empty (no value to show)
+    master_df = master_df.loc[:, master_df.notna().any(axis=0)]
+
+
+    # ── Preferred column order (only include columns that exist) ──────
+    preferred = [
         'Mã giao dịch', 'Ngày giao dịch', 'Giao dịch Mua/Bán (1: Mua, 2: Bán)',
         'Mã khách hàng', 'Tên khách hàng', 'Số tài khoản',
-        'Mã CP', 'Tên doanh nghiệp', 'Giá trị giao dịch', 'Khối lượng giao dịch', 'Giá giao dịch', 'Thuế bán', 'Phí net',
-        'Mã người quản lý', 'Tên người quản lý/CTV', 'Loại người quản lý (quản lý/CTV)',
+        'Mã CP', 'Tên doanh nghiệp', 'Giá trị giao dịch',
+        'Khối lượng giao dịch', 'Giá giao dịch', 'Thuế bán', 'Phí net',
+        'Mã người quản lý', 'Mã người quản lý/CTV', 'Tên người quản lý/CTV',
+        'Loại người quản lý (quản lý/CTV)',
         'Mã định danh công ty', 'Tên công ty',
-        'Mã loại khách hàng', 'Mã nhóm khách hàng', 'NAV', 'Dư nợ gốc', 'Dư nợ lãi', 'Ngày tới hạn gần nhất', 'Ghi chú', 'Tình trạng hoạt động (1: có, 0: không)'
+        'Mã loại khách hàng', 'Mã nhóm khách hàng',
+        'NAV', 'Dư nợ gốc', 'Dư nợ lãi', 'Ngày tới hạn gần nhất',
+        'Ghi chú', 'Tình trạng hoạt động (1: có, 0: không)',
+        'Tổng dư nợ',
+        'Giá mở cửa ngày giao dịch gần nhất', 'Giá đóng cửa ngày giao dịch gần nhất',
     ]
-    
-    # Filter existing columns
-    final_cols = [c for c in target_columns if c in master_df.columns]
-    return master_df[final_cols]
+    # Only keep columns that exist and are not all-null
+    final_cols = [c for c in preferred if c in master_df.columns
+                  and master_df[c].notna().any()]
+    # Append any remaining columns not in preferred list
+    extra = [c for c in master_df.columns if c not in final_cols]
+    return master_df[final_cols + extra].reset_index(drop=True)
 
 def generate_sql_script(db_tables):
     """Generates SQL DDL and DML statements for PostgreSQL / Supabase."""
@@ -596,9 +719,6 @@ def generate_sql_script(db_tables):
         sql_lines.append("\n")
 
     return "\n".join(sql_lines)
-
-    import io
-import openpyxl
 
 def is_multi_sheet_data_model(fbytes):
     """
