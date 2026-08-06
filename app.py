@@ -164,11 +164,11 @@ master_df = etl.build_master_flat_table(db_tables)
 # ────────────────────────────────────────────
 # Metrics bar
 # ────────────────────────────────────────────
-df_gd = db_tables.get('Giao_dich', pd.DataFrame())
+df_gd = db_tables.get('giao_dich', pd.DataFrame())
 total_tx  = len(df_gd)
-total_val = pd.to_numeric(df_gd.get('Giá trị giao dịch', pd.Series(dtype=float)), errors='coerce').sum() if not df_gd.empty else 0
-total_cust  = len(db_tables.get('Khach_hang', pd.DataFrame()))
-total_stock = len(db_tables.get('Co_phieu', pd.DataFrame()))
+total_val = pd.to_numeric(df_gd.get('gia_tri_giao_dich', pd.Series(dtype=float)), errors='coerce').sum() if not df_gd.empty else 0
+total_cust  = len(db_tables.get('khach_hang', pd.DataFrame()))
+total_stock = len(db_tables.get('co_phieu', pd.DataFrame()))
 total_files = len(processed_file_names)
 
 cols = st.columns(5)

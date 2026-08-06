@@ -7,16 +7,16 @@ import pandas as pd
 
 # Mapping between sheet names in PBSV-style multi-sheet Excel → canonical table names
 PBSV_SHEET_MAP = {
-    'CoPhieu':          'Co_phieu',
-    'CongTyChungKhoan': 'Cong_ty_chung_khoan',
-    'NguoiQuanLy':      'Nguoi_quan_ly',
-    'ChinhSach':        'Chinh_sach',
-    'PhanLoaiKhachHang':'Phan_loai_khach_hang',
-    'NhomKhachHang':    'Nhom_khach_hang',
-    'KhachHang':        'Khach_hang',
-    'GiaoDich':         'Giao_dich',
-    'PhiGiaHan':        'Phi_gia_han',
-    'BaoCaoThuLai':     'Bao_cao_thu_lai',
+    'CoPhieu':          'co_phieu',
+    'CongTyChungKhoan': 'cong_ty_chung_khoan',
+    'NguoiQuanLy':      'nguoi_quan_ly',
+    'ChinhSach':        'chinh_sach',
+    'PhanLoaiKhachHang':'phan_loai_khach_hang',
+    'NhomKhachHang':    'nhom_khach_hang',
+    'KhachHang':        'khach_hang',
+    'GiaoDich':         'giao_dich',
+    'PhiGiaHan':        'phi_gia_han',
+    'BaoCaoThuLai':     'bao_cao_thu_lai',
 }
 
 
@@ -490,30 +490,34 @@ def parse_pdf_data(file_bytes_or_path, filename=""):
 def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
     """
     Transforms extracted Excel and/or PDF data into the 11 relational tables defined in
-    DATA MODEL.png: Cong_ty_chung_khoan, Nguoi_quan_ly, Chinh_sach, Phan_loai_khach_hang,
-    Nhom_khach_hang, Khach_hang, Tieu_khoan, Co_phieu, Giao_dich, Phi_gia_han, Bao_cao_thu_lai.
+    DATA MODEL.png: cong_ty_chung_khoan, nguoi_quan_ly, chinh_sach, phan_loai_khach_hang,
+    nhom_khach_hang, khach_hang, tieu_khoan, co_phieu, giao_dich, phi_gia_han, bao_cao_thu_lai.
     Works with ANY single list or combination of lists.
 
-    Khach_hang is keyed by 'Số tài khoản' (the account holder). Tieu_khoan is the new
-    weak entity — one or more sub-accounts ('Số tiểu khoản') per Khách hàng — and
-    Giao_dich now references Tieu_khoan, not Khách hàng directly.
+    Table and column names are lowercase snake_case (matching supabase_schema.sql exactly),
+    e.g. 'ma_giao_dich', 'so_tai_khoan' — this is what's shown in the editable grids and
+    what generate_sql_script() writes straight into INSERT statements, no translation layer.
+
+    khach_hang is keyed by 'so_tai_khoan' (the account holder). tieu_khoan is the weak
+    entity — one or more sub-accounts ('so_tieu_khoan') per Khách hàng — and giao_dich
+    references tieu_khoan, not khach_hang directly.
     """
     excel_tx_list = excel_tx_list or []
     pdf_tx_list = pdf_tx_list or []
     all_tx_raw = excel_tx_list + pdf_tx_list
 
-    # 1. Cong_ty_chung_khoan
+    # 1. cong_ty_chung_khoan
     company_map = {}
     co_id_counter = 1
     for r in all_tx_raw:
         c_name = r.get('company', 'Công ty Chứng khoán')
         if c_name not in company_map:
             c_code = "CTCK_" + str(co_id_counter)
-            company_map[c_name] = {'ID': co_id_counter, 'Mã định danh công ty': c_code, 'Tên công ty': c_name}
+            company_map[c_name] = {'id': co_id_counter, 'ma_dinh_danh_cong_ty': c_code, 'ten_cong_ty': c_name}
             co_id_counter += 1
 
     if not company_map:
-        company_map['Công ty Chứng khoán Default'] = {'ID': 1, 'Mã định danh công ty': 'CTCK_01', 'Tên công ty': 'Công ty Chứng khoán Default'}
+        company_map['Công ty Chứng khoán Default'] = {'id': 1, 'ma_dinh_danh_cong_ty': 'CTCK_01', 'ten_cong_ty': 'Công ty Chứng khoán Default'}
 
     df_company = pd.DataFrame(list(company_map.values()))
 
@@ -541,12 +545,12 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
             pdf_generated_codes[norm] = code
             r['manager_code'] = code
 
-    # 2. Nguoi_quan_ly
+    # 2. nguoi_quan_ly
     managers_dict = {}
     mgr_id_counter = 1
 
     for r in excel_tx_list:
-        co_id = company_map.get(r.get('company'), {}).get('ID', 1)
+        co_id = company_map.get(r.get('company'), {}).get('id', 1)
         for field, role in [('broker', 'Môi giới'), ('ctv', 'CTV')]:
             val = r.get(field, '')
             if val:
@@ -555,89 +559,89 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
                 name = parts[1].strip() if len(parts) > 1 else parts[0].strip()
                 if code not in managers_dict:
                     managers_dict[code] = {
-                        'ID': mgr_id_counter,
-                        'Mã người quản lý/CTV': code,
-                        'Tên người quản lý/CTV': name,
-                        'Loại người quản lý (quản lý/CTV)': role,
-                        'Mã công ty chứng khoán': co_id,
-                        'Tình trạng hoạt động (1: có, 0: không)': 1
+                        'id': mgr_id_counter,
+                        'ma_nguoi_quan_ly_ctv': code,
+                        'ten_nguoi_quan_ly_ctv': name,
+                        'loai_nguoi_quan_ly': role,
+                        'ma_cong_ty_chung_khoan': co_id,
+                        'tinh_trang_hoat_dong': 1
                     }
                     mgr_id_counter += 1
 
     for r in pdf_tx_list:
-        co_id = company_map.get(r.get('company'), {}).get('ID', 1)
+        co_id = company_map.get(r.get('company'), {}).get('id', 1)
         mgr_name = r.get('manager', 'Người quản lý')
         code = r.get('manager_code') or ("NQL_" + _slugify_name(mgr_name))
         if code not in managers_dict:
             managers_dict[code] = {
-                'ID': mgr_id_counter,
-                'Mã người quản lý/CTV': code,
-                'Tên người quản lý/CTV': mgr_name,
-                'Loại người quản lý (quản lý/CTV)': r.get('manager_role', 'Quản lý tài khoản'),
-                'Mã công ty chứng khoán': co_id,
-                'Tình trạng hoạt động (1: có, 0: không)': 1
+                'id': mgr_id_counter,
+                'ma_nguoi_quan_ly_ctv': code,
+                'ten_nguoi_quan_ly_ctv': mgr_name,
+                'loai_nguoi_quan_ly': r.get('manager_role', 'Quản lý tài khoản'),
+                'ma_cong_ty_chung_khoan': co_id,
+                'tinh_trang_hoat_dong': 1
             }
             mgr_id_counter += 1
 
     if not managers_dict:
         managers_dict['NQL_DEF'] = {
-            'ID': 1, 'Mã người quản lý/CTV': 'NQL_DEF', 'Tên người quản lý/CTV': 'Người quản lý hệ thống',
-            'Loại người quản lý (quản lý/CTV)': 'Quản lý', 'Mã công ty chứng khoán': 1, 'Tình trạng hoạt động (1: có, 0: không)': 1
+            'id': 1, 'ma_nguoi_quan_ly_ctv': 'NQL_DEF', 'ten_nguoi_quan_ly_ctv': 'Người quản lý hệ thống',
+            'loai_nguoi_quan_ly': 'Quản lý', 'ma_cong_ty_chung_khoan': 1, 'tinh_trang_hoat_dong': 1
         }
 
     df_manager = pd.DataFrame(list(managers_dict.values()))
 
-    # 3. Phân loại khách hàng & Nhóm khách hàng & Chính sách
+    # 3. phan_loai_khach_hang & nhom_khach_hang & chinh_sach
     df_chinh_sach = pd.DataFrame([
         {
-            'Mã chính sách': 'CS01',
-            'Tên chính sách': 'Chính sách giao dịch chuẩn',
-            'Lãi suất': 0.105,
-            'Phí giao dịch': 0.00075,
-            'Phí ứng trước': 0.0003,
-            'Phí gia hạn': 0.0005,
-            'Lãi gia hạn': 0.0002,
-            'Thời hạn': 90,
-            'Hạn mức tổng': 50000000000.0,
-            'Tỷ lệ vay': 0.5
+            'ma_chinh_sach': 'CS01',
+            'ten_chinh_sach': 'Chính sách giao dịch chuẩn',
+            'lai_suat': 0.105,
+            'phi_giao_dich': 0.00075,
+            'phi_ung_truoc': 0.0003,
+            'phi_gia_han': 0.0005,
+            'lai_gia_han': 0.0002,
+            'thoi_han': 90,
+            'han_muc_tong': 50000000000.0,
+            'ty_le_vay': 0.5
         }
     ])
 
     df_phan_loai_kh = pd.DataFrame([
         {
-            'Mã loại khách hàng': 'LKH01',
-            'Tên loại khách hàng': 'Khách hàng cá nhân',
-            'Phân loại': 'Cá nhân',
-            'Mô tả': 'Tài khoản giao dịch cá nhân',
-            'Mã chính sách': 'CS01'
+            'ma_loai_khach_hang': 'LKH01',
+            'ten_loai_khach_hang': 'Khách hàng cá nhân',
+            'phan_loai': 'Cá nhân',
+            'mo_ta': 'Tài khoản giao dịch cá nhân',
+            'ma_chinh_sach': 'CS01'
         },
         {
-            'Mã loại khách hàng': 'LKH02',
-            'Tên loại khách hàng': 'Khách hàng tổ chức',
-            'Phân loại': 'Tổ chức',
-            'Mô tả': 'Doanh nghiệp / Quỹ đầu tư',
-            'Mã chính sách': 'CS01'
+            'ma_loai_khach_hang': 'LKH02',
+            'ten_loai_khach_hang': 'Khách hàng tổ chức',
+            'phan_loai': 'Tổ chức',
+            'mo_ta': 'Doanh nghiệp / Quỹ đầu tư',
+            'ma_chinh_sach': 'CS01'
         }
     ])
 
     df_nhom_kh = pd.DataFrame([
         {
-            'Mã nhóm khách hàng': 'NKH01',
-            'Tên nhóm khách hàng': 'Nhóm giao dịch thường',
-            'Phân nhóm': 'Tiêu chuẩn',
-            'Mã chính sách': 'CS01',
-            'Mô tả': 'Nhóm khách hàng cơ bản'
+            'ma_nhom_khach_hang': 'NKH01',
+            'ten_nhom_khach_hang': 'Nhóm giao dịch thường',
+            'phan_nhom': 'Tiêu chuẩn',
+            'ma_chinh_sach': 'CS01',
+            'mo_ta': 'Nhóm khách hàng cơ bản'
         }
     ])
 
-    # 4. Khách hàng (PK = Số tài khoản) — keyed by parent_acc, so several Tiểu khoản
+    # 4. khach_hang (PK = so_tai_khoan) — keyed by parent_acc, so several tiểu khoản
     #    (sub_acc) that share the same parent account collapse into ONE customer row.
     customers_dict = {}
     for r in all_tx_raw:
         sub_acc = r.get('sub_acc', 'TK_DEFAULT')
         parent_acc = r.get('parent_acc') or sub_acc
         if parent_acc not in customers_dict:
-            co_id = company_map.get(r.get('company'), {}).get('ID', 1)
+            co_id = company_map.get(r.get('company'), {}).get('id', 1)
             mgr_code = 'NQL_DEF'
             if r.get('ctv'): mgr_code = r['ctv'].split('-')[0]
             elif r.get('broker'): mgr_code = r['broker'].split('-')[0]
@@ -647,50 +651,50 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
             cust_type = 'LKH02' if is_org else 'LKH01'
 
             customers_dict[parent_acc] = {
-                'Số tài khoản': parent_acc,
-                'Tên khách hàng': r.get('cust_name', 'Khách hàng'),
-                'Mã công ty chứng khoán': co_id,
-                'Mã loại khách hàng': cust_type,
-                'Mã nhóm khách hàng': 'NKH01',
-                'Mã người quản lý': mgr_code,
-                'NAV': 0.0,
-                'Dư nợ gốc': 0.0,
-                'Dư nợ lãi': 0.0,
-                'Ngày tới hạn gần nhất': None,
-                'Ghi chú': f"Imported from {r.get('source', 'Report')}",
-                'Tình trạng hoạt động (1: có, 0: không)': 1,
-                'Tổng dư nợ': 0.0
+                'so_tai_khoan': parent_acc,
+                'ten_khach_hang': r.get('cust_name', 'Khách hàng'),
+                'ma_cong_ty_chung_khoan': co_id,
+                'ma_loai_khach_hang': cust_type,
+                'ma_nhom_khach_hang': 'NKH01',
+                'ma_nguoi_quan_ly': mgr_code,
+                'nav': 0.0,
+                'du_no_goc': 0.0,
+                'du_no_lai': 0.0,
+                'ngay_toi_han_gan_nhat': None,
+                'ghi_chu': f"Imported from {r.get('source', 'Report')}",
+                'tinh_trang_hoat_dong': 1,
+                'tong_du_no': 0.0
             }
 
     df_customer = pd.DataFrame(list(customers_dict.values()))
 
-    # 5. Tiểu khoản (weak entity, PK = Số tiểu khoản + Số tài khoản)
+    # 5. tieu_khoan (weak entity, PK = so_tieu_khoan + so_tai_khoan)
     tieu_khoan_dict = {}
     for r in all_tx_raw:
         sub_acc = r.get('sub_acc', 'TK_DEFAULT')
         parent_acc = r.get('parent_acc') or sub_acc
         if sub_acc not in tieu_khoan_dict:
             tieu_khoan_dict[sub_acc] = {
-                'Số tiểu khoản': sub_acc,
-                'Số tài khoản': parent_acc
+                'so_tieu_khoan': sub_acc,
+                'so_tai_khoan': parent_acc
             }
     df_tieu_khoan = pd.DataFrame(list(tieu_khoan_dict.values()))
 
-    # 6. Cổ phiếu
+    # 6. co_phieu
     stocks_dict = {}
     for r in all_tx_raw:
         sym = r.get('symbol', 'VNINDEX')
         if sym and sym not in stocks_dict:
             price = r.get('buy_price_avg', 0.0) or r.get('sell_price_avg', 0.0) or 0.0
             stocks_dict[sym] = {
-                'Mã cổ phiếu': sym,
-                'Tên doanh nghiệp': f"CTCP {sym}",
-                'Giá mở cửa ngày giao dịch gần nhất': price,
-                'Giá đóng cửa ngày giao dịch gần nhất': price
+                'ma_co_phieu': sym,
+                'ten_doanh_nghiep': f"CTCP {sym}",
+                'gia_mo_cua_ngay_giao_dich_gan_nhat': price,
+                'gia_dong_cua_ngay_giao_dich_gan_nhat': price
             }
     df_stock = pd.DataFrame(list(stocks_dict.values()))
 
-    # 7. Giao dịch (FK -> Tiểu khoản.Số tiểu khoản, not Khách hàng directly)
+    # 7. giao_dich (FK -> tieu_khoan.so_tieu_khoan, not khach_hang directly)
     tx_list = []
 
     # Excel transactions (both "trade_result" and "order_history" rows share this shape)
@@ -701,32 +705,32 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
 
         if r.get('buy_val', 0) > 0 or r.get('buy_qty_matched', 0) > 0:
             tx_list.append({
-                'Mã giao dịch': r['shl'],
-                'Số tiểu khoản': r['sub_acc'],
-                'Mã người quản lý': mgr_code,
-                'Giá trị giao dịch': r['buy_val'],
-                'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 1,
-                'Mã CP': r['symbol'],
-                'Thuế bán': 0.0,
-                'Ngày giao dịch': r.get('tx_date') or '',
-                'Phí net': r.get('fee_val', 0.0),
-                'Khối lượng giao dịch': r.get('buy_qty_matched', 0.0),
-                'Giá giao dịch': r.get('buy_price_avg', 0.0)
+                'ma_giao_dich': r['shl'],
+                'so_tieu_khoan': r['sub_acc'],
+                'ma_nguoi_quan_ly': mgr_code,
+                'gia_tri_giao_dich': r['buy_val'],
+                'giao_dich_mua_ban': 1,
+                'ma_cp': r['symbol'],
+                'thue_ban': 0.0,
+                'ngay_giao_dich': r.get('tx_date') or '',
+                'phi_net': r.get('fee_val', 0.0),
+                'khoi_luong_giao_dich': r.get('buy_qty_matched', 0.0),
+                'gia_giao_dich': r.get('buy_price_avg', 0.0)
             })
 
         if r.get('sell_val', 0) > 0 or r.get('sell_qty_matched', 0) > 0:
             tx_list.append({
-                'Mã giao dịch': r['shl'],
-                'Số tiểu khoản': r['sub_acc'],
-                'Mã người quản lý': mgr_code,
-                'Giá trị giao dịch': r['sell_val'],
-                'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 2,
-                'Mã CP': r['symbol'],
-                'Thuế bán': r.get('tax_val', 0.0),
-                'Ngày giao dịch': r.get('tx_date') or '',
-                'Phí net': r.get('fee_val', 0.0),
-                'Khối lượng giao dịch': r.get('sell_qty_matched', 0.0),
-                'Giá giao dịch': r.get('sell_price_avg', 0.0)
+                'ma_giao_dich': r['shl'],
+                'so_tieu_khoan': r['sub_acc'],
+                'ma_nguoi_quan_ly': mgr_code,
+                'gia_tri_giao_dich': r['sell_val'],
+                'giao_dich_mua_ban': 2,
+                'ma_cp': r['symbol'],
+                'thue_ban': r.get('tax_val', 0.0),
+                'ngay_giao_dich': r.get('tx_date') or '',
+                'phi_net': r.get('fee_val', 0.0),
+                'khoi_luong_giao_dich': r.get('sell_qty_matched', 0.0),
+                'gia_giao_dich': r.get('sell_price_avg', 0.0)
             })
 
     # PDF transactions (generate sequential ID: sub_acc + symbol + index)
@@ -740,64 +744,64 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
         if r.get('buy_val', 0) > 0:
             pdf_seq += 1
             tx_list.append({
-                'Mã giao dịch': f"{sub_acc}{symbol}{str(pdf_seq).zfill(4)}",
-                'Số tiểu khoản': sub_acc,
-                'Mã người quản lý': mgr_code,
-                'Giá trị giao dịch': r['buy_val'],
-                'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 1,
-                'Mã CP': symbol,
-                'Thuế bán': 0.0,
-                'Ngày giao dịch': tx_date,
-                'Phí net': r['buy_val'] * 0.00075,
-                'Khối lượng giao dịch': 0.0,
-                'Giá giao dịch': 0.0
+                'ma_giao_dich': f"{sub_acc}{symbol}{str(pdf_seq).zfill(4)}",
+                'so_tieu_khoan': sub_acc,
+                'ma_nguoi_quan_ly': mgr_code,
+                'gia_tri_giao_dich': r['buy_val'],
+                'giao_dich_mua_ban': 1,
+                'ma_cp': symbol,
+                'thue_ban': 0.0,
+                'ngay_giao_dich': tx_date,
+                'phi_net': r['buy_val'] * 0.00075,
+                'khoi_luong_giao_dich': 0.0,
+                'gia_giao_dich': 0.0
             })
 
         if r.get('sell_val', 0) > 0:
             pdf_seq += 1
             tx_list.append({
-                'Mã giao dịch': f"{sub_acc}{symbol}{str(pdf_seq).zfill(4)}",
-                'Số tiểu khoản': sub_acc,
-                'Mã người quản lý': mgr_code,
-                'Giá trị giao dịch': r['sell_val'],
-                'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 2,
-                'Mã CP': symbol,
-                'Thuế bán': r['sell_val'] * 0.001,
-                'Ngày giao dịch': tx_date,
-                'Phí net': r['sell_val'] * 0.00075,
-                'Khối lượng giao dịch': 0.0,
-                'Giá giao dịch': 0.0
+                'ma_giao_dich': f"{sub_acc}{symbol}{str(pdf_seq).zfill(4)}",
+                'so_tieu_khoan': sub_acc,
+                'ma_nguoi_quan_ly': mgr_code,
+                'gia_tri_giao_dich': r['sell_val'],
+                'giao_dich_mua_ban': 2,
+                'ma_cp': symbol,
+                'thue_ban': r['sell_val'] * 0.001,
+                'ngay_giao_dich': tx_date,
+                'phi_net': r['sell_val'] * 0.00075,
+                'khoi_luong_giao_dich': 0.0,
+                'gia_giao_dich': 0.0
             })
 
     df_giao_dich = pd.DataFrame(tx_list) if tx_list else pd.DataFrame(columns=[
-        'Mã giao dịch', 'Số tiểu khoản', 'Mã người quản lý', 'Giá trị giao dịch',
-        'Giao dịch Mua/Bán (1: Mua, 2: Bán)', 'Mã CP', 'Thuế bán', 'Ngày giao dịch',
-        'Phí net', 'Khối lượng giao dịch', 'Giá giao dịch'
+        'ma_giao_dich', 'so_tieu_khoan', 'ma_nguoi_quan_ly', 'gia_tri_giao_dich',
+        'giao_dich_mua_ban', 'ma_cp', 'thue_ban', 'ngay_giao_dich',
+        'phi_net', 'khoi_luong_giao_dich', 'gia_giao_dich'
     ])
 
-    # 8. Phí gia hạn & 9. Báo cáo thu lãi
+    # 8. phi_gia_han & 9. bao_cao_thu_lai
     # No source report supplies phí gia hạn / lãi thu data — leave these empty with
     # the correct columns rather than fabricating a fake all-zero placeholder row
     # that the user would just have to notice and delete by hand.
     df_phi_gia_han = pd.DataFrame(columns=[
-        'ID', 'Ngày', 'Mã khách hàng', 'Phí gia hạn dự thu', 'Phí gia hạn thực thu', 'Lãi'
+        'id', 'ngay', 'ma_khach_hang', 'phi_gia_han_du_thu', 'phi_gia_han_thuc_thu', 'lai'
     ])
     df_bao_cao_thu_lai = pd.DataFrame(columns=[
-        'ID', 'Ngày thu lãi', 'Mã khách hàng', 'Lãi vay', 'Lãi ứng trước'
+        'id', 'ngay_thu_lai', 'ma_khach_hang', 'lai_vay', 'lai_ung_truoc'
     ])
 
     return {
-        'Cong_ty_chung_khoan': df_company,
-        'Nguoi_quan_ly': df_manager,
-        'Chinh_sach': df_chinh_sach,
-        'Phan_loai_khach_hang': df_phan_loai_kh,
-        'Nhom_khach_hang': df_nhom_kh,
-        'Khach_hang': df_customer,
-        'Tieu_khoan': df_tieu_khoan,
-        'Co_phieu': df_stock,
-        'Giao_dich': df_giao_dich,
-        'Phi_gia_han': df_phi_gia_han,
-        'Bao_cao_thu_lai': df_bao_cao_thu_lai
+        'cong_ty_chung_khoan': df_company,
+        'nguoi_quan_ly': df_manager,
+        'chinh_sach': df_chinh_sach,
+        'phan_loai_khach_hang': df_phan_loai_kh,
+        'nhom_khach_hang': df_nhom_kh,
+        'khach_hang': df_customer,
+        'tieu_khoan': df_tieu_khoan,
+        'co_phieu': df_stock,
+        'giao_dich': df_giao_dich,
+        'phi_gia_han': df_phi_gia_han,
+        'bao_cao_thu_lai': df_bao_cao_thu_lai
     }
 
 
@@ -807,132 +811,133 @@ def build_master_flat_table(db_tables):
     Handles both ETL-generated tables and PBSV multi-sheet workbook column naming conventions.
     Only includes columns that actually have data — never fills in values from wrong columns.
     """
-    df_gd  = db_tables.get('Giao_dich', pd.DataFrame()).copy()
-    df_kh  = db_tables.get('Khach_hang', pd.DataFrame()).copy()
-    df_tk  = db_tables.get('Tieu_khoan', pd.DataFrame()).copy()
-    df_nql = db_tables.get('Nguoi_quan_ly', pd.DataFrame()).copy()
-    df_co  = db_tables.get('Cong_ty_chung_khoan', pd.DataFrame()).copy()
-    df_cp  = db_tables.get('Co_phieu', pd.DataFrame()).copy()
+    df_gd  = db_tables.get('giao_dich', pd.DataFrame()).copy()
+    df_kh  = db_tables.get('khach_hang', pd.DataFrame()).copy()
+    df_tk  = db_tables.get('tieu_khoan', pd.DataFrame()).copy()
+    df_nql = db_tables.get('nguoi_quan_ly', pd.DataFrame()).copy()
+    df_co  = db_tables.get('cong_ty_chung_khoan', pd.DataFrame()).copy()
+    df_cp  = db_tables.get('co_phieu', pd.DataFrame()).copy()
 
     if df_gd.empty:
         return pd.DataFrame()
 
     # ── Detect column naming convention ──────────────────────────────
-    # ETL-generated:   'Số tiểu khoản', 'Mã người quản lý', 'Mã CP', ...
-    # PBSV multi-sheet: 'Mã KH (FK)', 'Mã người QL (FK)', 'Mã CP (FK)', ...
+    # ETL-generated:   'so_tieu_khoan', 'ma_nguoi_quan_ly', 'ma_cp', ...
+    # PBSV multi-sheet: 'Mã KH (FK)', 'Mã người QL (FK)', 'Mã CP (FK)', ... (raw headers
+    # from the uploaded workbook itself — outside our control, so left un-translated)
     is_pbsv = 'Mã KH (FK)' in df_gd.columns
 
     if is_pbsv:
-        # ── Rename PBSV columns → canonical names for joining ─────────
+        # ── Rename PBSV columns → canonical snake_case names for joining ──
         gd_rename = {
-            'Mã KH (FK)':        'Mã khách hàng',
-            'Tên KH':            'Tên khách hàng_gd',  # keep separately
+            'Mã KH (FK)':        'ma_khach_hang',
+            'Tên KH':            'ten_khach_hang__gd',  # keep separately
             'Mã người QL (FK)':  '_mgr_fk',
-            'Tên người QL':      'Tên người quản lý_gd',
-            'Mua/Bán (1:Mua, 2:Bán)': 'Giao dịch Mua/Bán (1: Mua, 2: Bán)',
-            'Mã CP (FK)':        'Mã CP',
-            'Tên DN (CP)':       'Tên doanh nghiệp_gd',
-            'Ngày giao dịch':    'Ngày giao dịch',
-            'Khối lượng GD':     'Khối lượng giao dịch',
-            'Giá GD':            'Giá giao dịch',
+            'Tên người QL':      'ten_nguoi_quan_ly__gd',
+            'Mua/Bán (1:Mua, 2:Bán)': 'giao_dich_mua_ban',
+            'Mã CP (FK)':        'ma_cp',
+            'Tên DN (CP)':       'ten_doanh_nghiep__gd',
+            'Ngày giao dịch':    'ngay_giao_dich',
+            'Khối lượng GD':     'khoi_luong_giao_dich',
+            'Giá GD':            'gia_giao_dich',
         }
         df_gd.rename(columns={k: v for k, v in gd_rename.items() if k in df_gd.columns}, inplace=True)
 
         kh_rename = {
-            'Mã KH':                         'Mã khách hàng',
-            'Mã Cty CK (FK)':                'Mã công ty chứng khoán',
-            'Mã loại KH (FK)':               'Mã loại khách hàng',
-            'Mã nhóm KH (FK)':               'Mã nhóm khách hàng',
+            'Mã KH':                         'ma_khach_hang',
+            'Mã Cty CK (FK)':                'ma_cong_ty_chung_khoan',
+            'Mã loại KH (FK)':               'ma_loai_khach_hang',
+            'Mã nhóm KH (FK)':               'ma_nhom_khach_hang',
             'Mã người QL (FK)':              '_kh_mgr_fk',
-            'Tình trạng hoạt động (1/0)':   'Tình trạng hoạt động (1: có, 0: không)',
+            'Tình trạng hoạt động (1/0)':   'tinh_trang_hoat_dong',
         }
         df_kh.rename(columns={k: v for k, v in kh_rename.items() if k in df_kh.columns}, inplace=True)
 
         nql_rename = {
-            'Mã người QL/CTV': 'Mã người quản lý/CTV',
-            'Tên người QL/CTV': 'Tên người quản lý/CTV',
-            'Loại (Quản lý/CTV)': 'Loại người quản lý (quản lý/CTV)',
+            'Mã người QL/CTV': 'ma_nguoi_quan_ly_ctv',
+            'Tên người QL/CTV': 'ten_nguoi_quan_ly_ctv',
+            'Loại (Quản lý/CTV)': 'loai_nguoi_quan_ly',
         }
         df_nql.rename(columns={k: v for k, v in nql_rename.items() if k in df_nql.columns}, inplace=True)
 
         cp_rename = {
-            'Mã cổ phiếu': 'Mã cổ phiếu',
-            'Giá mở cửa (gần nhất)': 'Giá mở cửa ngày giao dịch gần nhất',
-            'Giá đóng cửa (gần nhất)': 'Giá đóng cửa ngày giao dịch gần nhất',
+            'Mã cổ phiếu': 'ma_co_phieu',
+            'Giá mở cửa (gần nhất)': 'gia_mo_cua_ngay_giao_dich_gan_nhat',
+            'Giá đóng cửa (gần nhất)': 'gia_dong_cua_ngay_giao_dich_gan_nhat',
         }
         df_cp.rename(columns={k: v for k, v in cp_rename.items() if k in df_cp.columns}, inplace=True)
 
-        # Build Mã người quản lý in Giao_dich from NQL lookup
-        if '_mgr_fk' in df_gd.columns and 'ID' in df_nql.columns:
-            nql_lookup = df_nql[['ID', 'Mã người quản lý/CTV']].copy()
-            nql_lookup['ID'] = pd.to_numeric(nql_lookup['ID'], errors='coerce')
+        # Build ma_nguoi_quan_ly in giao_dich from NQL lookup
+        if '_mgr_fk' in df_gd.columns and 'id' in df_nql.columns:
+            nql_lookup = df_nql[['id', 'ma_nguoi_quan_ly_ctv']].copy()
+            nql_lookup['id'] = pd.to_numeric(nql_lookup['id'], errors='coerce')
             df_gd['_mgr_fk'] = pd.to_numeric(df_gd['_mgr_fk'], errors='coerce')
-            df_gd = pd.merge(df_gd, nql_lookup, left_on='_mgr_fk', right_on='ID', how='left')
-            df_gd.rename(columns={'Mã người quản lý/CTV': 'Mã người quản lý'}, inplace=True)
-            df_gd.drop(columns=['_mgr_fk', 'ID'], errors='ignore', inplace=True)
+            df_gd = pd.merge(df_gd, nql_lookup, left_on='_mgr_fk', right_on='id', how='left')
+            df_gd.rename(columns={'ma_nguoi_quan_ly_ctv': 'ma_nguoi_quan_ly'}, inplace=True)
+            df_gd.drop(columns=['_mgr_fk', 'id'], errors='ignore', inplace=True)
 
-        # ── Merge Giao_dich ← Khach_hang (legacy PBSV convention: direct FK) ──
-        if 'Mã khách hàng' in df_gd.columns and 'Mã khách hàng' in df_kh.columns:
+        # ── Merge giao_dich ← khach_hang (legacy PBSV convention: direct FK) ──
+        if 'ma_khach_hang' in df_gd.columns and 'ma_khach_hang' in df_kh.columns:
             kh_cols_to_keep = [c for c in df_kh.columns
-                               if c not in df_gd.columns or c == 'Mã khách hàng']
-            master_df = pd.merge(df_gd, df_kh[kh_cols_to_keep], on='Mã khách hàng', how='left')
+                               if c not in df_gd.columns or c == 'ma_khach_hang']
+            master_df = pd.merge(df_gd, df_kh[kh_cols_to_keep], on='ma_khach_hang', how='left')
         else:
             master_df = df_gd.copy()
     else:
-        # ── ETL convention: Giao_dich.Số tiểu khoản -> Tiểu khoản -> Khách hàng.Số tài khoản ──
-        if 'Số tiểu khoản' in df_gd.columns and 'Số tiểu khoản' in df_tk.columns:
-            master_df = pd.merge(df_gd, df_tk, on='Số tiểu khoản', how='left')
+        # ── ETL convention: giao_dich.so_tieu_khoan -> tieu_khoan -> khach_hang.so_tai_khoan ──
+        if 'so_tieu_khoan' in df_gd.columns and 'so_tieu_khoan' in df_tk.columns:
+            master_df = pd.merge(df_gd, df_tk, on='so_tieu_khoan', how='left')
         else:
             master_df = df_gd.copy()
 
-        if 'Số tài khoản' in master_df.columns and 'Số tài khoản' in df_kh.columns:
+        if 'so_tai_khoan' in master_df.columns and 'so_tai_khoan' in df_kh.columns:
             kh_cols_to_keep = [c for c in df_kh.columns
-                               if c not in master_df.columns or c == 'Số tài khoản']
-            master_df = pd.merge(master_df, df_kh[kh_cols_to_keep], on='Số tài khoản', how='left')
+                               if c not in master_df.columns or c == 'so_tai_khoan']
+            master_df = pd.merge(master_df, df_kh[kh_cols_to_keep], on='so_tai_khoan', how='left')
 
-    # ── Merge ← Nguoi_quan_ly ────────────────────────────────────────
-    if 'Mã người quản lý' in master_df.columns and 'Mã người quản lý/CTV' in df_nql.columns:
+    # ── Merge ← nguoi_quan_ly ────────────────────────────────────────
+    if 'ma_nguoi_quan_ly' in master_df.columns and 'ma_nguoi_quan_ly_ctv' in df_nql.columns:
         nql_cols = [c for c in df_nql.columns
-                    if c not in master_df.columns or c == 'Mã người quản lý/CTV']
+                    if c not in master_df.columns or c == 'ma_nguoi_quan_ly_ctv']
         master_df = pd.merge(master_df, df_nql[nql_cols],
-                             left_on='Mã người quản lý', right_on='Mã người quản lý/CTV',
-                             how='left', suffixes=('', '_nql'))
+                             left_on='ma_nguoi_quan_ly', right_on='ma_nguoi_quan_ly_ctv',
+                             how='left', suffixes=('', '__nql'))
 
-    # ── Merge ← Cong_ty_chung_khoan ─────────────────────────────────
+    # ── Merge ← cong_ty_chung_khoan ─────────────────────────────────
     co_id_col = None
-    if 'Mã công ty chứng khoán' in master_df.columns:
-        co_id_col = 'Mã công ty chứng khoán'
-    if co_id_col and 'ID' in df_co.columns:
+    if 'ma_cong_ty_chung_khoan' in master_df.columns:
+        co_id_col = 'ma_cong_ty_chung_khoan'
+    if co_id_col and 'id' in df_co.columns:
         co_cols = [c for c in df_co.columns
-                   if c not in master_df.columns or c == 'ID']
+                   if c not in master_df.columns or c == 'id']
         master_df = pd.merge(master_df, df_co[co_cols],
-                             left_on=co_id_col, right_on='ID',
-                             how='left', suffixes=('', '_co'))
+                             left_on=co_id_col, right_on='id',
+                             how='left', suffixes=('', '__co'))
 
-    # ── Merge ← Co_phieu ─────────────────────────────────────────────
-    if 'Mã CP' in master_df.columns and 'Mã cổ phiếu' in df_cp.columns:
+    # ── Merge ← co_phieu ─────────────────────────────────────────────
+    if 'ma_cp' in master_df.columns and 'ma_co_phieu' in df_cp.columns:
         cp_cols = [c for c in df_cp.columns
-                   if c not in master_df.columns or c == 'Mã cổ phiếu']
+                   if c not in master_df.columns or c == 'ma_co_phieu']
         master_df = pd.merge(master_df, df_cp[cp_cols],
-                             left_on='Mã CP', right_on='Mã cổ phiếu',
-                             how='left', suffixes=('', '_cp'))
+                             left_on='ma_cp', right_on='ma_co_phieu',
+                             how='left', suffixes=('', '__cp'))
 
     # ── Drop internal helper / duplicate columns ──────────────────────
     always_drop = {
         '_mgr_fk', '_kh_mgr_fk',
         'Tên Cty CK', 'Tên công ty CK', 'MucLuc',
-        'ID',                                       # numeric PK used only for join
-        'Mã cổ phiếu',                              # duplicate of 'Mã CP'
-        'Mã Cty CK (FK)',                           # raw FK kept after rename
-        'Mã công ty chứng khoán',                   # numeric FK, Mã định danh công ty is cleaner
-        'Tên người QL',                             # duplicate of 'Tên người quản lý/CTV'
-        'Tên loại KH',                              # short alias, Mã loại khách hàng is sufficient
-        'Tên nhóm KH',                              # short alias, Mã nhóm khách hàng is sufficient
-        'Tình trạng hoạt động (1:có, 0:không)',     # already renamed to canonical
-        'Mã người quản lý',                         # keep only Mã người quản lý/CTV (same value)
+        'id',                                        # numeric PK used only for join
+        'ma_co_phieu',                               # duplicate of 'ma_cp'
+        'Mã Cty CK (FK)',                            # raw FK kept after rename
+        'ma_cong_ty_chung_khoan',                    # numeric FK, ma_dinh_danh_cong_ty is cleaner
+        'Tên người QL',                              # duplicate of 'ten_nguoi_quan_ly_ctv'
+        'Tên loại KH',                               # short alias, ma_loai_khach_hang is sufficient
+        'Tên nhóm KH',                               # short alias, ma_nhom_khach_hang is sufficient
+        'Tình trạng hoạt động (1:có, 0:không)',      # already renamed to canonical
+        'ma_nguoi_quan_ly',                          # keep only ma_nguoi_quan_ly_ctv (same value)
     }
     drop_cols = [c for c in master_df.columns
-                 if c.endswith(('_gd', '_kh', '_nql', '_co', '_cp')) or c in always_drop]
+                 if c.endswith(('__gd', '__kh', '__nql', '__co', '__cp')) or c in always_drop]
     master_df.drop(columns=drop_cols, errors='ignore', inplace=True)
     dup_cols = [c for c in master_df.columns if c.endswith('_x') or c.endswith('_y')]
     master_df.drop(columns=dup_cols, errors='ignore', inplace=True)
@@ -940,18 +945,18 @@ def build_master_flat_table(db_tables):
 
     # ── Preferred column order (only include columns that exist) ──────
     preferred = [
-        'Mã giao dịch', 'Ngày giao dịch', 'Giao dịch Mua/Bán (1: Mua, 2: Bán)',
-        'Số tiểu khoản', 'Số tài khoản', 'Tên khách hàng',
-        'Mã CP', 'Tên doanh nghiệp', 'Giá trị giao dịch',
-        'Khối lượng giao dịch', 'Giá giao dịch', 'Thuế bán', 'Phí net',
-        'Mã người quản lý/CTV', 'Tên người quản lý/CTV',
-        'Loại người quản lý (quản lý/CTV)',
-        'Mã định danh công ty', 'Tên công ty',
-        'Mã loại khách hàng', 'Mã nhóm khách hàng',
-        'NAV', 'Dư nợ gốc', 'Dư nợ lãi', 'Ngày tới hạn gần nhất',
-        'Ghi chú', 'Tình trạng hoạt động (1: có, 0: không)',
-        'Tổng dư nợ',
-        'Giá mở cửa ngày giao dịch gần nhất', 'Giá đóng cửa ngày giao dịch gần nhất',
+        'ma_giao_dich', 'ngay_giao_dich', 'giao_dich_mua_ban',
+        'so_tieu_khoan', 'so_tai_khoan', 'ten_khach_hang',
+        'ma_cp', 'ten_doanh_nghiep', 'gia_tri_giao_dich',
+        'khoi_luong_giao_dich', 'gia_giao_dich', 'thue_ban', 'phi_net',
+        'ma_nguoi_quan_ly_ctv', 'ten_nguoi_quan_ly_ctv',
+        'loai_nguoi_quan_ly',
+        'ma_dinh_danh_cong_ty', 'ten_cong_ty',
+        'ma_loai_khach_hang', 'ma_nhom_khach_hang',
+        'nav', 'du_no_goc', 'du_no_lai', 'ngay_toi_han_gan_nhat',
+        'ghi_chu', 'tinh_trang_hoat_dong',
+        'tong_du_no',
+        'gia_mo_cua_ngay_giao_dich_gan_nhat', 'gia_dong_cua_ngay_giao_dich_gan_nhat',
     ]
     final_cols = [c for c in preferred if c in master_df.columns
                   and master_df[c].notna().any()]
@@ -960,135 +965,105 @@ def build_master_flat_table(db_tables):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# SQL generation — mirrors supabase_schema.sql exactly (table names, column
-# names/types, PK/FK relationships) so the generated INSERTs actually run
-# against a database created from that script.
+# SQL generation — table/column names in db_tables are already the exact
+# snake_case identifiers used in supabase_schema.sql, so this just emits
+# CREATE TABLE IF NOT EXISTS + INSERT statements directly from them.
 # ────────────────────────────────────────────────────────────────────────────
 
-# Each entry: (table_name, CREATE TABLE ddl, {Vietnamese label -> sql column}, {date columns}, needs_identity_override)
+# Each entry: (table_name, CREATE TABLE ddl, {date columns}, needs_identity_override)
 _TABLE_DEFS = [
     (
-        'Cong_ty_chung_khoan',
-        "CREATE TABLE IF NOT EXISTS Cong_ty_chung_khoan ("
+        'cong_ty_chung_khoan',
+        "CREATE TABLE IF NOT EXISTS cong_ty_chung_khoan ("
         "id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, "
         "ma_dinh_danh_cong_ty VARCHAR(50), ten_cong_ty VARCHAR(255));",
-        {'ID': 'id', 'Mã định danh công ty': 'ma_dinh_danh_cong_ty', 'Tên công ty': 'ten_cong_ty'},
         set(), True,
     ),
     (
-        'Chinh_sach',
-        "CREATE TABLE IF NOT EXISTS Chinh_sach ("
+        'chinh_sach',
+        "CREATE TABLE IF NOT EXISTS chinh_sach ("
         "ma_chinh_sach VARCHAR(50) PRIMARY KEY, ten_chinh_sach VARCHAR(255), "
         "lai_suat NUMERIC(10,4), phi_giao_dich NUMERIC(10,4), phi_ung_truoc NUMERIC(10,4), "
         "phi_gia_han NUMERIC(10,4), lai_gia_han NUMERIC(10,4), thoi_han INT, "
         "han_muc_tong NUMERIC(18,2), ty_le_vay NUMERIC(10,4));",
-        {'Mã chính sách': 'ma_chinh_sach', 'Tên chính sách': 'ten_chinh_sach', 'Lãi suất': 'lai_suat',
-         'Phí giao dịch': 'phi_giao_dich', 'Phí ứng trước': 'phi_ung_truoc', 'Phí gia hạn': 'phi_gia_han',
-         'Lãi gia hạn': 'lai_gia_han', 'Thời hạn': 'thoi_han', 'Hạn mức tổng': 'han_muc_tong',
-         'Tỷ lệ vay': 'ty_le_vay'},
         set(), False,
     ),
     (
-        'Nguoi_quan_ly',
-        "CREATE TABLE IF NOT EXISTS Nguoi_quan_ly ("
+        'nguoi_quan_ly',
+        "CREATE TABLE IF NOT EXISTS nguoi_quan_ly ("
         "id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, ma_nguoi_quan_ly_ctv VARCHAR(50) UNIQUE, "
         "ten_nguoi_quan_ly_ctv VARCHAR(255), loai_nguoi_quan_ly VARCHAR(50), "
-        "ma_cong_ty_chung_khoan BIGINT REFERENCES Cong_ty_chung_khoan(id), "
+        "ma_cong_ty_chung_khoan BIGINT REFERENCES cong_ty_chung_khoan(id), "
         "tinh_trang_hoat_dong SMALLINT DEFAULT 1);",
-        {'ID': 'id', 'Mã người quản lý/CTV': 'ma_nguoi_quan_ly_ctv', 'Tên người quản lý/CTV': 'ten_nguoi_quan_ly_ctv',
-         'Loại người quản lý (quản lý/CTV)': 'loai_nguoi_quan_ly', 'Mã công ty chứng khoán': 'ma_cong_ty_chung_khoan',
-         'Tình trạng hoạt động (1: có, 0: không)': 'tinh_trang_hoat_dong'},
         set(), True,
     ),
     (
-        'Phan_loai_khach_hang',
-        "CREATE TABLE IF NOT EXISTS Phan_loai_khach_hang ("
+        'phan_loai_khach_hang',
+        "CREATE TABLE IF NOT EXISTS phan_loai_khach_hang ("
         "ma_loai_khach_hang VARCHAR(50) PRIMARY KEY, ten_loai_khach_hang VARCHAR(255), "
-        "phan_loai VARCHAR(100), mo_ta TEXT, ma_chinh_sach VARCHAR(50) REFERENCES Chinh_sach(ma_chinh_sach));",
-        {'Mã loại khách hàng': 'ma_loai_khach_hang', 'Tên loại khách hàng': 'ten_loai_khach_hang',
-         'Phân loại': 'phan_loai', 'Mô tả': 'mo_ta', 'Mã chính sách': 'ma_chinh_sach'},
+        "phan_loai VARCHAR(100), mo_ta TEXT, ma_chinh_sach VARCHAR(50) REFERENCES chinh_sach(ma_chinh_sach));",
         set(), False,
     ),
     (
-        'Nhom_khach_hang',
-        "CREATE TABLE IF NOT EXISTS Nhom_khach_hang ("
+        'nhom_khach_hang',
+        "CREATE TABLE IF NOT EXISTS nhom_khach_hang ("
         "ma_nhom_khach_hang VARCHAR(50) PRIMARY KEY, ten_nhom_khach_hang VARCHAR(255), "
-        "phan_nhom VARCHAR(100), ma_chinh_sach VARCHAR(50) REFERENCES Chinh_sach(ma_chinh_sach), mo_ta TEXT);",
-        {'Mã nhóm khách hàng': 'ma_nhom_khach_hang', 'Tên nhóm khách hàng': 'ten_nhom_khach_hang',
-         'Phân nhóm': 'phan_nhom', 'Mã chính sách': 'ma_chinh_sach', 'Mô tả': 'mo_ta'},
+        "phan_nhom VARCHAR(100), ma_chinh_sach VARCHAR(50) REFERENCES chinh_sach(ma_chinh_sach), mo_ta TEXT);",
         set(), False,
     ),
     (
-        'Co_phieu',
-        "CREATE TABLE IF NOT EXISTS Co_phieu ("
+        'co_phieu',
+        "CREATE TABLE IF NOT EXISTS co_phieu ("
         "ma_co_phieu VARCHAR(20) PRIMARY KEY, ten_doanh_nghiep VARCHAR(255), "
         "gia_mo_cua_ngay_giao_dich_gan_nhat NUMERIC(18,2), gia_dong_cua_ngay_giao_dich_gan_nhat NUMERIC(18,2));",
-        {'Mã cổ phiếu': 'ma_co_phieu', 'Tên doanh nghiệp': 'ten_doanh_nghiep',
-         'Giá mở cửa ngày giao dịch gần nhất': 'gia_mo_cua_ngay_giao_dich_gan_nhat',
-         'Giá đóng cửa ngày giao dịch gần nhất': 'gia_dong_cua_ngay_giao_dich_gan_nhat'},
         set(), False,
     ),
     (
-        'Khach_hang',
-        "CREATE TABLE IF NOT EXISTS Khach_hang ("
+        'khach_hang',
+        "CREATE TABLE IF NOT EXISTS khach_hang ("
         "so_tai_khoan VARCHAR(50) PRIMARY KEY, ten_khach_hang VARCHAR(255), "
-        "ma_cong_ty_chung_khoan BIGINT REFERENCES Cong_ty_chung_khoan(id), "
-        "ma_loai_khach_hang VARCHAR(50) REFERENCES Phan_loai_khach_hang(ma_loai_khach_hang), "
-        "ma_nhom_khach_hang VARCHAR(50) REFERENCES Nhom_khach_hang(ma_nhom_khach_hang), "
-        "ma_nguoi_quan_ly VARCHAR(50) REFERENCES Nguoi_quan_ly(ma_nguoi_quan_ly_ctv), "
+        "ma_cong_ty_chung_khoan BIGINT REFERENCES cong_ty_chung_khoan(id), "
+        "ma_loai_khach_hang VARCHAR(50) REFERENCES phan_loai_khach_hang(ma_loai_khach_hang), "
+        "ma_nhom_khach_hang VARCHAR(50) REFERENCES nhom_khach_hang(ma_nhom_khach_hang), "
+        "ma_nguoi_quan_ly VARCHAR(50) REFERENCES nguoi_quan_ly(ma_nguoi_quan_ly_ctv), "
         "nav NUMERIC(18,2) DEFAULT 0, du_no_goc NUMERIC(18,2) DEFAULT 0, du_no_lai NUMERIC(18,2) DEFAULT 0, "
         "ngay_toi_han_gan_nhat DATE, ghi_chu TEXT, tinh_trang_hoat_dong SMALLINT DEFAULT 1, "
         "tong_du_no NUMERIC(18,2) DEFAULT 0);",
-        {'Số tài khoản': 'so_tai_khoan', 'Tên khách hàng': 'ten_khach_hang',
-         'Mã công ty chứng khoán': 'ma_cong_ty_chung_khoan', 'Mã loại khách hàng': 'ma_loai_khach_hang',
-         'Mã nhóm khách hàng': 'ma_nhom_khach_hang', 'Mã người quản lý': 'ma_nguoi_quan_ly',
-         'NAV': 'nav', 'Dư nợ gốc': 'du_no_goc', 'Dư nợ lãi': 'du_no_lai',
-         'Ngày tới hạn gần nhất': 'ngay_toi_han_gan_nhat', 'Ghi chú': 'ghi_chu',
-         'Tình trạng hoạt động (1: có, 0: không)': 'tinh_trang_hoat_dong', 'Tổng dư nợ': 'tong_du_no'},
         {'ngay_toi_han_gan_nhat'}, False,
     ),
     (
-        'Tieu_khoan',
-        "CREATE TABLE IF NOT EXISTS Tieu_khoan ("
+        'tieu_khoan',
+        "CREATE TABLE IF NOT EXISTS tieu_khoan ("
         "so_tieu_khoan VARCHAR(50) NOT NULL, "
-        "so_tai_khoan VARCHAR(50) NOT NULL REFERENCES Khach_hang(so_tai_khoan), "
+        "so_tai_khoan VARCHAR(50) NOT NULL REFERENCES khach_hang(so_tai_khoan), "
         "PRIMARY KEY (so_tieu_khoan, so_tai_khoan), UNIQUE (so_tieu_khoan));",
-        {'Số tiểu khoản': 'so_tieu_khoan', 'Số tài khoản': 'so_tai_khoan'},
         set(), False,
     ),
     (
-        'Giao_dich',
-        "CREATE TABLE IF NOT EXISTS Giao_dich ("
-        "ma_giao_dich VARCHAR(100) PRIMARY KEY, so_tieu_khoan VARCHAR(50) REFERENCES Tieu_khoan(so_tieu_khoan), "
-        "ma_nguoi_quan_ly VARCHAR(50) REFERENCES Nguoi_quan_ly(ma_nguoi_quan_ly_ctv), "
+        'giao_dich',
+        "CREATE TABLE IF NOT EXISTS giao_dich ("
+        "ma_giao_dich VARCHAR(100) PRIMARY KEY, so_tieu_khoan VARCHAR(50) REFERENCES tieu_khoan(so_tieu_khoan), "
+        "ma_nguoi_quan_ly VARCHAR(50) REFERENCES nguoi_quan_ly(ma_nguoi_quan_ly_ctv), "
         "gia_tri_giao_dich NUMERIC(18,2), giao_dich_mua_ban SMALLINT, "
-        "ma_cp VARCHAR(20) REFERENCES Co_phieu(ma_co_phieu), thue_ban NUMERIC(18,2), "
+        "ma_cp VARCHAR(20) REFERENCES co_phieu(ma_co_phieu), thue_ban NUMERIC(18,2), "
         "ngay_giao_dich DATE, phi_net NUMERIC(18,2), khoi_luong_giao_dich NUMERIC(18,2), "
         "gia_giao_dich NUMERIC(18,2));",
-        {'Mã giao dịch': 'ma_giao_dich', 'Số tiểu khoản': 'so_tieu_khoan', 'Mã người quản lý': 'ma_nguoi_quan_ly',
-         'Giá trị giao dịch': 'gia_tri_giao_dich', 'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 'giao_dich_mua_ban',
-         'Mã CP': 'ma_cp', 'Thuế bán': 'thue_ban', 'Ngày giao dịch': 'ngay_giao_dich', 'Phí net': 'phi_net',
-         'Khối lượng giao dịch': 'khoi_luong_giao_dich', 'Giá giao dịch': 'gia_giao_dich'},
         {'ngay_giao_dich'}, False,
     ),
     (
-        'Phi_gia_han',
-        "CREATE TABLE IF NOT EXISTS Phi_gia_han ("
+        'phi_gia_han',
+        "CREATE TABLE IF NOT EXISTS phi_gia_han ("
         "id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, ngay DATE, "
-        "ma_khach_hang VARCHAR(50) REFERENCES Khach_hang(so_tai_khoan), "
+        "ma_khach_hang VARCHAR(50) REFERENCES khach_hang(so_tai_khoan), "
         "phi_gia_han_du_thu NUMERIC(18,2), phi_gia_han_thuc_thu NUMERIC(18,2), lai NUMERIC(18,2));",
-        {'ID': 'id', 'Ngày': 'ngay', 'Mã khách hàng': 'ma_khach_hang', 'Phí gia hạn dự thu': 'phi_gia_han_du_thu',
-         'Phí gia hạn thực thu': 'phi_gia_han_thuc_thu', 'Lãi': 'lai'},
         {'ngay'}, True,
     ),
     (
-        'Bao_cao_thu_lai',
-        "CREATE TABLE IF NOT EXISTS Bao_cao_thu_lai ("
+        'bao_cao_thu_lai',
+        "CREATE TABLE IF NOT EXISTS bao_cao_thu_lai ("
         "id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, ngay_thu_lai DATE, "
-        "ma_khach_hang VARCHAR(50) REFERENCES Khach_hang(so_tai_khoan), "
+        "ma_khach_hang VARCHAR(50) REFERENCES khach_hang(so_tai_khoan), "
         "lai_vay NUMERIC(18,2), lai_ung_truoc NUMERIC(18,2));",
-        {'ID': 'id', 'Ngày thu lãi': 'ngay_thu_lai', 'Mã khách hàng': 'ma_khach_hang',
-         'Lãi vay': 'lai_vay', 'Lãi ứng trước': 'lai_ung_truoc'},
         {'ngay_thu_lai'}, True,
     ),
 ]
@@ -1103,21 +1078,20 @@ def generate_sql_script(db_tables):
     """
     sql_lines = ["-- SQL Script generated by Streamlit Data Engineering Tool\n"]
 
-    for tbl_name, ddl, col_map, date_cols, needs_override in _TABLE_DEFS:
+    for tbl_name, ddl, date_cols, needs_override in _TABLE_DEFS:
         sql_lines.append(f"-- Table: {tbl_name}\n{ddl}")
         df = db_tables.get(tbl_name)
         if df is not None and not df.empty:
-            sql_cols = [col_map.get(c, c.lower().replace(' ', '_')) for c in df.columns]
+            sql_cols = list(df.columns)
             col_str = ", ".join(sql_cols)
             override_clause = "OVERRIDING SYSTEM VALUE " if needs_override and 'id' in sql_cols else ""
 
             for _, row in df.iterrows():
                 vals = []
-                for col_label, v in zip(df.columns, row.values):
-                    sql_col = col_map.get(col_label)
+                for col, v in zip(df.columns, row.values):
                     if pd.isna(v) or v is None or v == '':
                         vals.append("NULL")
-                    elif sql_col in date_cols:
+                    elif col in date_cols:
                         iso = _to_iso_date(v)
                         vals.append(f"'{iso}'" if iso else "NULL")
                     elif isinstance(v, (int, float)):
