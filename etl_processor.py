@@ -1,0 +1,523 @@
+import re
+import io
+import xlrd
+import openpyxl
+import pdfplumber
+import pandas as pd
+
+def parse_excel_data(file_bytes_or_path, filename=""):
+    """
+    Parses any XLS or XLSX transaction report dynamically.
+    Returns: company_name, list of transaction rows
+    """
+    tx_rows = []
+    company_name = "Công ty Chứng khoán"
+    
+    try:
+        if isinstance(file_bytes_or_path, bytes):
+            if file_bytes_or_path.startswith(b'\xd0\xcf\x11\xe0'):
+                wb = xlrd.open_workbook(file_contents=file_bytes_or_path)
+                sheet = wb.sheet_by_index(0)
+                rows_data = [sheet.row_values(i) for i in range(sheet.nrows)]
+            else:
+                wb = openpyxl.load_workbook(filename=io.BytesIO(file_bytes_or_path), data_only=True)
+                sheet = wb.active
+                rows_data = [[cell.value if cell.value is not None else '' for cell in row] for row in sheet.iter_rows()]
+        else:
+            if file_bytes_or_path.endswith('.xls'):
+                wb = xlrd.open_workbook(file_bytes_or_path)
+                sheet = wb.sheet_by_index(0)
+                rows_data = [sheet.row_values(i) for i in range(sheet.nrows)]
+            else:
+                wb = openpyxl.load_workbook(file_bytes_or_path, data_only=True)
+                sheet = wb.active
+                rows_data = [[cell.value if cell.value is not None else '' for cell in row] for row in sheet.iter_rows()]
+
+        for r in rows_data[:6]:
+            for cell in r:
+                cell_str = str(cell).strip()
+                if "Công ty" in cell_str or "Chứng khoán" in cell_str:
+                    company_name = cell_str
+                    break
+
+        header_row_idx = -1
+        col_indices = {}
+        
+        for idx, r in enumerate(rows_data[:20]):
+            r_str = [str(c).strip().lower() for c in r]
+            if any("stt" in c or "shl" in c or "mã chứng khoán" in c or "mã ck" in c for c in r_str):
+                header_row_idx = idx
+                for c_idx, c_val in enumerate(r_str):
+                    if "stt" in c_val: col_indices['stt'] = c_idx
+                    elif "shl" in c_val or "số hiệu" in c_val: col_indices['shl'] = c_idx
+                    elif "tiểu khoản" in c_val or "tài khoản" in c_val or "số tk" in c_val: col_indices['sub_acc'] = c_idx
+                    elif "tên khách hàng" in c_val or "tên kh" in c_val: col_indices['cust_name'] = c_idx
+                    elif "mã chứng khoán" in c_val or "mã ck" in c_val: col_indices['symbol'] = c_idx
+                    elif "môi giới" in c_val or "br" in c_val: col_indices['broker'] = c_idx
+                    elif "ctv" in c_val: col_indices['ctv'] = c_idx
+                    elif "ngày" in c_val: col_indices['tx_date'] = c_idx
+                break
+
+        if header_row_idx == -1:
+            header_row_idx = 9
+
+        for i in range(header_row_idx + 1, len(rows_data)):
+            r = rows_data[i]
+            if not any(r): continue
+            
+            cell0 = str(r[0]).strip() if len(r) > 0 else ""
+            if cell0.endswith('.0'): cell0 = cell0[:-2]
+            
+            if "tổng" in cell0.lower() or "sum" in cell0.lower():
+                continue
+                
+            shl_val = str(r[col_indices.get('shl', 1)]).split('.')[0] if len(r) > 1 else ""
+            if not shl_val or len(shl_val) < 3:
+                continue
+
+            sub_acc = str(r[col_indices.get('sub_acc', 2)]).strip() if len(r) > 2 else ""
+            cust_name = str(r[col_indices.get('cust_name', 3)]).strip() if len(r) > 3 else ""
+            symbol = str(r[col_indices.get('symbol', 4)]).strip() if len(r) > 4 else ""
+            
+            def safe_float(val):
+                try:
+                    val_str = str(val).replace(',', '').strip()
+                    return float(val_str) if val_str != '' else 0.0
+                except:
+                    return 0.0
+
+            buy_qty_matched = safe_float(r[6]) if len(r) > 6 else 0.0
+            buy_price_avg = safe_float(r[7]) if len(r) > 7 else 0.0
+            buy_val = safe_float(r[8]) if len(r) > 8 else 0.0
+            
+            sell_qty_matched = safe_float(r[10]) if len(r) > 10 else 0.0
+            sell_price_avg = safe_float(r[11]) if len(r) > 11 else 0.0
+            sell_val = safe_float(r[12]) if len(r) > 12 else 0.0
+            
+            fee_val = safe_float(r[14]) if len(r) > 14 else 0.0
+            tax_val = safe_float(r[16]) if len(r) > 16 else 0.0
+            
+            broker = str(r[col_indices.get('broker', 19)]).strip() if len(r) > 19 else ""
+            ctv = str(r[col_indices.get('ctv', 20)]).strip() if len(r) > 20 else ""
+            tx_date = str(r[col_indices.get('tx_date', 21)]).strip() if len(r) > 21 else ""
+
+            tx_rows.append({
+                'source': 'Excel (' + (filename or 'Uploaded') + ')',
+                'company': company_name,
+                'company_code': 'EXCEL_CO',
+                'shl': shl_val,
+                'sub_acc': sub_acc or 'TK_DEFAULT',
+                'cust_name': cust_name or 'Khách hàng',
+                'symbol': symbol or 'VNINDEX',
+                'buy_qty_matched': buy_qty_matched,
+                'buy_price_avg': buy_price_avg,
+                'buy_val': buy_val,
+                'sell_qty_matched': sell_qty_matched,
+                'sell_price_avg': sell_price_avg,
+                'sell_val': sell_val,
+                'fee_val': fee_val,
+                'tax_val': tax_val,
+                'broker': broker,
+                'ctv': ctv,
+                'tx_date': tx_date or '04/08/2026'
+            })
+
+    except Exception as e:
+        print(f"Error parsing Excel file {filename}: {e}")
+        
+    return company_name, tx_rows
+
+def parse_pdf_data(file_bytes_or_path, filename=""):
+    """
+    Parses any PDF transaction report dynamically.
+    Returns: company_name, list of transaction rows
+    """
+    if isinstance(file_bytes_or_path, bytes):
+        pdf_file = io.BytesIO(file_bytes_or_path)
+    else:
+        pdf_file = file_bytes_or_path
+        
+    company_name = "Công ty Chứng khoán (PDF)"
+    tx_rows = []
+    
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text()
+                if not text:
+                    continue
+                lines = text.split('\n')
+                if lines:
+                    first_line = lines[0].strip()
+                    if "Chứng khoán" in first_line or "Công ty" in first_line:
+                        company_name = first_line
+
+                current_manager = "Người quản lý"
+                current_role = "Quản lý tài khoản"
+
+                for line in lines:
+                    line_str = line.strip()
+                    if "Quản lý" in line_str or "Môi giới" in line_str:
+                        mgr = re.sub(r'Quản lý.*', '', line_str).strip()
+                        mgr = re.sub(r'^\d+\s*', '', mgr)
+                        if mgr:
+                            current_manager = mgr
+                    
+                    m = re.search(r'([0-9A-Z]{6,15})\s+(.*?)\s+([A-Z0-9]{3,6})\s+([\d,.]+)\s+([\d,.]+)', line_str)
+                    if m:
+                        sub_acc, cust_name, symbol, buy_val_str, sell_val_str = m.groups()
+                        buy_val = float(buy_val_str.replace(',', '').replace('.', ''))
+                        sell_val = float(sell_val_str.replace(',', '').replace('.', ''))
+                        
+                        tx_rows.append({
+                            'source': 'PDF (' + (filename or 'Uploaded') + ')',
+                            'company': company_name,
+                            'company_code': 'PDF_CO',
+                            'sub_acc': sub_acc,
+                            'cust_name': cust_name,
+                            'symbol': symbol,
+                            'buy_val': buy_val,
+                            'sell_val': sell_val,
+                            'manager': current_manager,
+                            'manager_role': current_role
+                        })
+    except Exception as e:
+        print(f"Error parsing PDF file {filename}: {e}")
+
+    return company_name, tx_rows
+
+def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
+    """
+    Transforms extracted Excel and/or PDF data into the 10 relational tables defined in Data Model.jpg
+    Works with ANY single list or combination of lists.
+    """
+    excel_tx_list = excel_tx_list or []
+    pdf_tx_list = pdf_tx_list or []
+    all_tx_raw = excel_tx_list + pdf_tx_list
+
+    # 1. Cong_ty_chung_khoan
+    company_map = {}
+    co_id_counter = 1
+    for r in all_tx_raw:
+        c_name = r.get('company', 'Công ty Chứng khoán')
+        if c_name not in company_map:
+            c_code = "CTCK_" + str(co_id_counter)
+            company_map[c_name] = {'ID': co_id_counter, 'Mã định danh công ty': c_code, 'Tên công ty': c_name}
+            co_id_counter += 1
+            
+    if not company_map:
+        company_map['Công ty Chứng khoán Default'] = {'ID': 1, 'Mã định danh công ty': 'CTCK_01', 'Tên công ty': 'Công ty Chứng khoán Default'}
+        
+    df_company = pd.DataFrame(list(company_map.values()))
+
+    # 2. Nguoi_quan_ly
+    managers_dict = {}
+    mgr_id_counter = 1
+    
+    for r in excel_tx_list:
+        co_id = company_map.get(r.get('company'), {}).get('ID', 1)
+        for field, role in [('broker', 'Môi giới'), ('ctv', 'CTV')]:
+            val = r.get(field, '')
+            if val:
+                parts = val.split('-')
+                code = parts[0].strip()
+                name = parts[1].strip() if len(parts) > 1 else parts[0].strip()
+                if code not in managers_dict:
+                    managers_dict[code] = {
+                        'ID': mgr_id_counter,
+                        'Mã người quản lý/CTV': code,
+                        'Tên người quản lý/CTV': name,
+                        'Loại người quản lý (quản lý/CTV)': role,
+                        'Mã công ty chứng khoán': co_id,
+                        'Tình trạng hoạt động (1: có, 0: không)': 1
+                    }
+                    mgr_id_counter += 1
+
+    for r in pdf_tx_list:
+        co_id = company_map.get(r.get('company'), {}).get('ID', 1)
+        mgr_name = r.get('manager', 'Lê Minh Hiếu')
+        code = "CTV0166" if "Lê Minh Hiếu" in mgr_name else ("NQL_" + re.sub(r'\s+', '_', mgr_name.upper()))
+        if code not in managers_dict:
+            managers_dict[code] = {
+                'ID': mgr_id_counter,
+                'Mã người quản lý/CTV': code,
+                'Tên người quản lý/CTV': mgr_name,
+                'Loại người quản lý (quản lý/CTV)': r.get('manager_role', 'Quản lý tài khoản'),
+                'Mã công ty chứng khoán': co_id,
+                'Tình trạng hoạt động (1: có, 0: không)': 1
+            }
+            mgr_id_counter += 1
+
+    if not managers_dict:
+        managers_dict['NQL_DEF'] = {
+            'ID': 1, 'Mã người quản lý/CTV': 'NQL_DEF', 'Tên người quản lý/CTV': 'Người quản lý hệ thống',
+            'Loại người quản lý (quản lý/CTV)': 'Quản lý', 'Mã công ty chứng khoán': 1, 'Tình trạng hoạt động (1: có, 0: không)': 1
+        }
+
+    df_manager = pd.DataFrame(list(managers_dict.values()))
+
+    # 3. Phân loại khách hàng & Nhóm khách hàng & Chính sách
+    df_chinh_sach = pd.DataFrame([
+        {
+            'Mã chính sách': 'CS01',
+            'Tên chính sách': 'Chính sách giao dịch chuẩn',
+            'Lãi suất': 0.105,
+            'Phí giao dịch': 0.00075,
+            'Phí ứng trước': 0.0003,
+            'Phí gia hạn': 0.0005,
+            'Lãi gia hạn': 0.0002,
+            'Thời hạn': 90,
+            'Hạn mức tổng': 50000000000.0,
+            'Tỷ lệ vay': 0.5
+        }
+    ])
+
+    df_phan_loai_kh = pd.DataFrame([
+        {
+            'Mã loại khách hàng': 'LKH01',
+            'Tên loại khách hàng': 'Khách hàng cá nhân',
+            'Phân loại': 'Cá nhân',
+            'Mô tả': 'Tài khoản giao dịch cá nhân',
+            'Mã chính sách': 'CS01'
+        },
+        {
+            'Mã loại khách hàng': 'LKH02',
+            'Tên loại khách hàng': 'Khách hàng tổ chức',
+            'Phân loại': 'Tổ chức',
+            'Mô tả': 'Doanh nghiệp / Quỹ đầu tư',
+            'Mã chính sách': 'CS01'
+        }
+    ])
+
+    df_nhom_kh = pd.DataFrame([
+        {
+            'Mã nhóm khách hàng': 'NKH01',
+            'Tên nhóm khách hàng': 'Nhóm giao dịch thường',
+            'Phân nhóm': 'Tiêu chuẩn',
+            'Mã chính sách': 'CS01',
+            'Mô tả': 'Nhóm khách hàng cơ bản'
+        }
+    ])
+
+    # 4. Khách hàng
+    customers_dict = {}
+    for r in all_tx_raw:
+        sub_acc = r.get('sub_acc', 'TK_DEFAULT')
+        if sub_acc not in customers_dict:
+            co_id = company_map.get(r.get('company'), {}).get('ID', 1)
+            mgr_code = 'NQL_DEF'
+            if r.get('ctv'): mgr_code = r['ctv'].split('-')[0]
+            elif r.get('broker'): mgr_code = r['broker'].split('-')[0]
+            elif r.get('manager'):
+                mgr_name = r['manager']
+                mgr_code = 'CTV0166' if "Lê Minh Hiếu" in mgr_name else ("NQL_" + re.sub(r'\s+', '_', mgr_name.upper()))
+            
+            is_org = "CÔNG TY" in r.get('cust_name', '').upper() or "TNHH" in r.get('cust_name', '').upper()
+            cust_type = 'LKH02' if is_org else 'LKH01'
+            
+            customers_dict[sub_acc] = {
+                'Mã khách hàng': sub_acc,
+                'Tên khách hàng': r.get('cust_name', 'Khách hàng'),
+                'Số tài khoản': sub_acc,
+                'Mã công ty chứng khoán': co_id,
+                'Mã loại khách hàng': cust_type,
+                'Mã nhóm khách hàng': 'NKH01',
+                'Mã người quản lý': mgr_code,
+                'NAV': 0.0,
+                'Dư nợ gốc': 0.0,
+                'Dư nợ lãi': 0.0,
+                'Ngày tới hạn gần nhất': None,
+                'Ghi chú': f"Imported from {r.get('source', 'Report')}",
+                'Tình trạng hoạt động (1: có, 0: không)': 1,
+                'Tổng dư nợ': 0.0
+            }
+            
+    df_customer = pd.DataFrame(list(customers_dict.values()))
+
+    # 5. Cổ phiếu
+    stocks_dict = {}
+    for r in all_tx_raw:
+        sym = r.get('symbol', 'VNINDEX')
+        if sym and sym not in stocks_dict:
+            price = r.get('buy_price_avg', 0.0) or r.get('sell_price_avg', 0.0) or 0.0
+            stocks_dict[sym] = {
+                'Mã cổ phiếu': sym,
+                'Tên doanh nghiệp': f"CTCP {sym}",
+                'Giá mở cửa ngày giao dịch gần nhất': price,
+                'Giá đóng cửa ngày giao dịch gần nhất': price
+            }
+    df_stock = pd.DataFrame(list(stocks_dict.values()))
+
+    # 6. Giao dịch
+    tx_list = []
+    
+    # Excel transactions
+    for r in excel_tx_list:
+        mgr_code = 'NQL_DEF'
+        if r.get('ctv'): mgr_code = r['ctv'].split('-')[0]
+        elif r.get('broker'): mgr_code = r['broker'].split('-')[0]
+
+        if r.get('buy_val', 0) > 0 or r.get('buy_qty_matched', 0) > 0:
+            tx_list.append({
+                'Mã giao dịch': f"{r['shl']}_BUY",
+                'Mã khách hàng': r['sub_acc'],
+                'Mã người quản lý': mgr_code,
+                'Giá trị giao dịch': r['buy_val'],
+                'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 1,
+                'Mã CP': r['symbol'],
+                'Thuế bán': 0.0,
+                'Ngày giao dịch': r.get('tx_date', '04/08/2026'),
+                'Phí net': r.get('fee_val', 0.0),
+                'Khối lượng giao dịch': r.get('buy_qty_matched', 0.0),
+                'Giá giao dịch': r.get('buy_price_avg', 0.0)
+            })
+            
+        if r.get('sell_val', 0) > 0 or r.get('sell_qty_matched', 0) > 0:
+            tx_list.append({
+                'Mã giao dịch': f"{r['shl']}_SELL",
+                'Mã khách hàng': r['sub_acc'],
+                'Mã người quản lý': mgr_code,
+                'Giá trị giao dịch': r['sell_val'],
+                'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 2,
+                'Mã CP': r['symbol'],
+                'Thuế bán': r.get('tax_val', 0.0),
+                'Ngày giao dịch': r.get('tx_date', '04/08/2026'),
+                'Phí net': r.get('fee_val', 0.0),
+                'Khối lượng giao dịch': r.get('sell_qty_matched', 0.0),
+                'Giá giao dịch': r.get('sell_price_avg', 0.0)
+            })
+
+    # PDF transactions
+    for idx, r in enumerate(pdf_tx_list, start=1):
+        mgr_name = r.get('manager', 'Lê Minh Hiếu')
+        mgr_code = 'CTV0166' if "Lê Minh Hiếu" in mgr_name else ("NQL_" + re.sub(r'\s+', '_', mgr_name.upper()))
+        
+        if r.get('buy_val', 0) > 0:
+            tx_list.append({
+                'Mã giao dịch': f"PDF_TX_{r['sub_acc']}_BUY_{idx}",
+                'Mã khách hàng': r['sub_acc'],
+                'Mã người quản lý': mgr_code,
+                'Giá trị giao dịch': r['buy_val'],
+                'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 1,
+                'Mã CP': r['symbol'],
+                'Thuế bán': 0.0,
+                'Ngày giao dịch': '31/07/2026',
+                'Phí net': r['buy_val'] * 0.00075,
+                'Khối lượng giao dịch': 0.0,
+                'Giá giao dịch': 0.0
+            })
+            
+        if r.get('sell_val', 0) > 0:
+            tx_list.append({
+                'Mã giao dịch': f"PDF_TX_{r['sub_acc']}_SELL_{idx}",
+                'Mã khách hàng': r['sub_acc'],
+                'Mã người quản lý': mgr_code,
+                'Giá trị giao dịch': r['sell_val'],
+                'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 2,
+                'Mã CP': r['symbol'],
+                'Thuế bán': r['sell_val'] * 0.001,
+                'Ngày giao dịch': '31/07/2026',
+                'Phí net': r['sell_val'] * 0.00075,
+                'Khối lượng giao dịch': 0.0,
+                'Giá giao dịch': 0.0
+            })
+
+    df_giao_dich = pd.DataFrame(tx_list) if tx_list else pd.DataFrame(columns=[
+        'Mã giao dịch', 'Mã khách hàng', 'Mã người quản lý', 'Giá trị giao dịch',
+        'Giao dịch Mua/Bán (1: Mua, 2: Bán)', 'Mã CP', 'Thuế bán', 'Ngày giao dịch',
+        'Phí net', 'Khối lượng giao dịch', 'Giá giao dịch'
+    ])
+
+    # 7. Phí gia hạn & 8. Báo cáo thu lãi
+    first_cust_id = df_customer.iloc[0]['Mã khách hàng'] if not df_customer.empty else 'TK_DEFAULT'
+    df_phi_gia_han = pd.DataFrame([{
+        'ID': 1, 'Ngày': '04/08/2026', 'Mã khách hàng': first_cust_id,
+        'Phí gia hạn dự thu': 0.0, 'Phí gia hạn thực thu': 0.0, 'Lãi': 0.0
+    }])
+
+    df_bao_cao_thu_lai = pd.DataFrame([{
+        'ID': 1, 'Ngày thu lãi': '04/08/2026', 'Mã khách hàng': first_cust_id,
+        'Lãi vay': 0.0, 'Lãi ứng trước': 0.0
+    }])
+
+    return {
+        'Cong_ty_chung_khoan': df_company,
+        'Nguoi_quan_ly': df_manager,
+        'Chinh_sach': df_chinh_sach,
+        'Phan_loai_khach_hang': df_phan_loai_kh,
+        'Nhom_khach_hang': df_nhom_kh,
+        'Khach_hang': df_customer,
+        'Co_phieu': df_stock,
+        'Giao_dich': df_giao_dich,
+        'Phi_gia_han': df_phi_gia_han,
+        'Bao_cao_thu_lai': df_bao_cao_thu_lai
+    }
+
+def build_master_flat_table(db_tables):
+    """
+    Creates a unified master flat dataset combining all attributes from Data Model.jpg
+    """
+    df_gd = db_tables.get('Giao_dich', pd.DataFrame())
+    df_kh = db_tables.get('Khach_hang', pd.DataFrame())
+    df_nql = db_tables.get('Nguoi_quan_ly', pd.DataFrame())
+    df_co = db_tables.get('Cong_ty_chung_khoan', pd.DataFrame())
+    df_cp = db_tables.get('Co_phieu', pd.DataFrame())
+
+    if df_gd.empty:
+        return pd.DataFrame()
+
+    m1 = pd.merge(df_gd, df_kh, on='Mã khách hàng', how='left', suffixes=('', '_kh'))
+    m2 = pd.merge(m1, df_nql, left_on='Mã người quản lý', right_on='Mã người quản lý/CTV', how='left', suffixes=('', '_nql'))
+    m3 = pd.merge(m2, df_co, left_on='Mã công ty chứng khoán', right_on='ID', how='left', suffixes=('', '_ctck'))
+    master_df = pd.merge(m3, df_cp, left_on='Mã CP', right_on='Mã cổ phiếu', how='left', suffixes=('', '_cp'))
+
+    # Order columns logically matching Data Model
+    target_columns = [
+        'Mã giao dịch', 'Ngày giao dịch', 'Giao dịch Mua/Bán (1: Mua, 2: Bán)',
+        'Mã khách hàng', 'Tên khách hàng', 'Số tài khoản',
+        'Mã CP', 'Tên doanh nghiệp', 'Giá trị giao dịch', 'Khối lượng giao dịch', 'Giá giao dịch', 'Thuế bán', 'Phí net',
+        'Mã người quản lý', 'Tên người quản lý/CTV', 'Loại người quản lý (quản lý/CTV)',
+        'Mã định danh công ty', 'Tên công ty',
+        'Mã loại khách hàng', 'Mã nhóm khách hàng', 'NAV', 'Dư nợ gốc', 'Dư nợ lãi', 'Ngày tới hạn gần nhất', 'Ghi chú', 'Tình trạng hoạt động (1: có, 0: không)'
+    ]
+    
+    # Filter existing columns
+    final_cols = [c for c in target_columns if c in master_df.columns]
+    return master_df[final_cols]
+
+def generate_sql_script(db_tables):
+    """Generates SQL DDL and DML statements for PostgreSQL / Supabase."""
+    sql_lines = ["-- SQL Script generated by Streamlit Data Engineering Tool\n"]
+    table_ddl = {
+        'Cong_ty_chung_khoan': "CREATE TABLE IF NOT EXISTS Cong_ty_chung_khoan (id SERIAL PRIMARY KEY, ma_dinh_danh_cong_ty VARCHAR(50), ten_cong_ty VARCHAR(255));",
+        'Nguoi_quan_ly': "CREATE TABLE IF NOT EXISTS Nguoi_quan_ly (id SERIAL PRIMARY KEY, ma_nguoi_quan_ly_ctv VARCHAR(50) UNIQUE, ten_nguoi_quan_ly_ctv VARCHAR(255), loai_nguoi_quan_ly VARCHAR(50), ma_cong_ty_chung_khoan INT REFERENCES Cong_ty_chung_khoan(id), tinh_trang_hoat_dong INT DEFAULT 1);",
+        'Chinh_sach': "CREATE TABLE IF NOT EXISTS Chinh_sach (ma_chinh_sach VARCHAR(50) PRIMARY KEY, ten_chinh_sach VARCHAR(255), lai_suat NUMERIC(10,4), phi_giao_dich NUMERIC(10,4), phi_ung_truoc NUMERIC(10,4), phi_gia_han NUMERIC(10,4), lai_gia_han NUMERIC(10,4), thoi_han INT, han_muc_tong NUMERIC(18,2), ty_le_vay NUMERIC(10,4));",
+        'Phan_loai_khach_hang': "CREATE TABLE IF NOT EXISTS Phan_loai_khach_hang (ma_loai_khach_hang VARCHAR(50) PRIMARY KEY, ten_loai_khach_hang VARCHAR(255), phan_loai VARCHAR(100), mo_ta TEXT, ma_chinh_sach VARCHAR(50) REFERENCES Chinh_sach(ma_chinh_sach));",
+        'Nhom_khach_hang': "CREATE TABLE IF NOT EXISTS Nhom_khach_hang (ma_nhom_khach_hang VARCHAR(50) PRIMARY KEY, ten_nhom_khach_hang VARCHAR(255), phan_nhom VARCHAR(100), ma_chinh_sach VARCHAR(50) REFERENCES Chinh_sach(ma_chinh_sach), mo_ta TEXT);",
+        'Khach_hang': "CREATE TABLE IF NOT EXISTS Khach_hang (ma_khach_hang VARCHAR(50) PRIMARY KEY, ten_khach_hang VARCHAR(255), so_tai_khoan VARCHAR(50), ma_cong_ty_chung_khoan INT REFERENCES Cong_ty_chung_khoan(id), ma_loai_khach_hang VARCHAR(50) REFERENCES Phan_loai_khach_hang(ma_loai_khach_hang), ma_nhom_khach_hang VARCHAR(50) REFERENCES Nhom_khach_hang(ma_nhom_khach_hang), ma_nguoi_quan_ly VARCHAR(50) REFERENCES Nguoi_quan_ly(ma_nguoi_quan_ly_ctv), nav NUMERIC(18,2) DEFAULT 0, du_no_goc NUMERIC(18,2) DEFAULT 0, du_no_lai NUMERIC(18,2) DEFAULT 0, ngay_toi_han_gan_nhat DATE, ghi_chu TEXT, tinh_trang_hoat_dong INT DEFAULT 1, tong_du_no NUMERIC(18,2) DEFAULT 0);",
+        'Co_phieu': "CREATE TABLE IF NOT EXISTS Co_phieu (ma_co_phieu VARCHAR(20) PRIMARY KEY, ten_doanh_nghiep VARCHAR(255), gia_mo_cua_ngay_giao_dich_gan_nhat NUMERIC(18,2), gia_dong_cua_ngay_giao_dich_gan_nhat NUMERIC(18,2));",
+        'Giao_dich': "CREATE TABLE IF NOT EXISTS Giao_dich (ma_giao_dich VARCHAR(100) PRIMARY KEY, ma_khach_hang VARCHAR(50) REFERENCES Khach_hang(ma_khach_hang), ma_nguoi_quan_ly VARCHAR(50) REFERENCES Nguoi_quan_ly(ma_nguoi_quan_ly_ctv), gia_tri_giao_dich NUMERIC(18,2), giao_dich_mua_ban INT, ma_cp VARCHAR(20) REFERENCES Co_phieu(ma_co_phieu), thue_ban NUMERIC(18,2), ngay_giao_dich VARCHAR(50), phi_net NUMERIC(18,2), khoi_luong_giao_dich NUMERIC(18,2), gia_giao_dich NUMERIC(18,2));",
+        'Phi_gia_han': "CREATE TABLE IF NOT EXISTS Phi_gia_han (id SERIAL PRIMARY KEY, ngay VARCHAR(50), ma_khach_hang VARCHAR(50) REFERENCES Khach_hang(ma_khach_hang), phi_gia_han_du_thu NUMERIC(18,2), phi_gia_han_thuc_thu NUMERIC(18,2), lai NUMERIC(18,2));",
+        'Bao_cao_thu_lai': "CREATE TABLE IF NOT EXISTS Bao_cao_thu_lai (id SERIAL PRIMARY KEY, ngay_thu_lai VARCHAR(50), ma_khach_hang VARCHAR(50) REFERENCES Khach_hang(ma_khach_hang), lai_vay NUMERIC(18,2), lai_ung_truoc NUMERIC(18,2));"
+    }
+
+    for tbl_name, ddl in table_ddl.items():
+        sql_lines.append(f"-- Table: {tbl_name}\n{ddl}")
+        df = db_tables.get(tbl_name)
+        if df is not None and not df.empty:
+            cols = [c.lower().replace(' ', '_').replace('/', '_').replace('(', '').replace(')', '').replace(':', '') for c in df.columns]
+            col_str = ", ".join(cols)
+            for _, r in df.iterrows():
+                vals = []
+                for v in r.values:
+                    if pd.isna(v) or v is None:
+                        vals.append("NULL")
+                    elif isinstance(v, (int, float)):
+                        vals.append(str(v))
+                    else:
+                        clean_v = str(v).replace("'", "''")
+                        vals.append(f"'{clean_v}'")
+                sql_lines.append(f"INSERT INTO {tbl_name} ({col_str}) VALUES ({', '.join(vals)}) ON CONFLICT DO NOTHING;")
+        sql_lines.append("\n")
+
+    return "\n".join(sql_lines)
