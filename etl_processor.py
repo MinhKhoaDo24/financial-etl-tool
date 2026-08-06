@@ -596,3 +596,16 @@ def generate_sql_script(db_tables):
         sql_lines.append("\n")
 
     return "\n".join(sql_lines)
+
+    import io
+import openpyxl
+
+def is_multi_sheet_data_model(fbytes):
+    """
+    Kiểm tra file Excel (dạng bytes) có phải là file nhiều sheet (Multi-sheet) hay không.
+    """
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(fbytes), read_only=True)
+        return len(wb.sheetnames) > 1
+    except Exception:
+        return False
