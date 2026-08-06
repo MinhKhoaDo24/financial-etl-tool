@@ -1,16 +1,22 @@
 -- ============================================================================
 -- PBSV Data Model — Supabase / PostgreSQL DDL
--- Generated from: Data Model.jpg
+-- Generated from: DATA MODEL.png (v2)
 -- Entities: Cong_ty_chung_khoan, Nguoi_quan_ly, Chinh_sach, Phan_loai_khach_hang,
---           Nhom_khach_hang, Khach_hang, Co_phieu, Giao_dich, Phi_gia_han,
---           Bao_cao_thu_lai
+--           Nhom_khach_hang, Khach_hang, Tieu_khoan, Co_phieu, Giao_dich,
+--           Phi_gia_han, Bao_cao_thu_lai
 -- Notes:
 --   - Tables are created in FK-dependency order.
 --   - "Mã ..." natural-key columns keep their business codes as PRIMARY KEY
 --     where the diagram shows them underlined (Mã cổ phiếu, Mã giao dịch,
---     Mã khách hàng, Mã loại khách hàng, Mã nhóm khách hàng, Mã chính sách).
+--     Số tài khoản, Mã loại khách hàng, Mã nhóm khách hàng, Mã chính sách).
 --   - Entities whose PK is drawn as "ID" (Công ty chứng khoán, Người quản lý,
 --     Phí gia hạn, Báo cáo thu lãi) use a surrogate BIGINT IDENTITY key.
+--   - Khách hàng's PK is Số tài khoản (v2 — was Mã khách hàng in v1).
+--   - Tiểu khoản is a new weak entity: composite PK (so_tieu_khoan, so_tai_khoan),
+--     FK so_tai_khoan -> Khach_hang. Giao_dich now references Tiểu khoản
+--     (so_tieu_khoan) instead of referencing Khách hàng directly.
+--   - For a database already running the v1 script, use
+--     supabase_migration_v2_tieu_khoan.sql instead of re-running this file.
 -- ============================================================================
 
 begin;
@@ -106,12 +112,11 @@ create table if not exists co_phieu (
 comment on table co_phieu is 'Cổ phiếu';
 
 -- ----------------------------------------------------------------------------
--- 7. Khách hàng
+-- 7. Khách hàng  (PK = Số tài khoản)
 -- ----------------------------------------------------------------------------
 create table if not exists khach_hang (
-    ma_khach_hang           varchar(50)  primary key,
+    so_tai_khoan            varchar(50)  primary key,
     ten_khach_hang          varchar(255) not null,
-    so_tai_khoan            varchar(50),
     ma_cong_ty_chung_khoan  bigint references cong_ty_chung_khoan(id) on delete restrict,
     ma_loai_khach_hang      varchar(50)  references phan_loai_khach_hang(ma_loai_khach_hang) on delete restrict,
     ma_nhom_khach_hang      varchar(50)  references nhom_khach_hang(ma_nhom_khach_hang) on delete restrict,
@@ -122,11 +127,10 @@ create table if not exists khach_hang (
     ngay_toi_han_gan_nhat   date,
     ghi_chu                 text,
     tinh_trang_hoat_dong    smallint      not null default 1 check (tinh_trang_hoat_dong in (0, 1)),
-    tong_du_no              numeric(18,2) default 0 check (tong_du_no >= 0),
-    constraint uq_khach_hang_so_tai_khoan unique (so_tai_khoan)
+    tong_du_no              numeric(18,2) default 0 check (tong_du_no >= 0)
 );
 
-comment on table khach_hang is 'Khách hàng';
+comment on table khach_hang is 'Khách hàng (chủ tài khoản)';
 
 create index if not exists idx_khach_hang_cong_ty on khach_hang (ma_cong_ty_chung_khoan);
 create index if not exists idx_khach_hang_loai on khach_hang (ma_loai_khach_hang);
@@ -136,11 +140,25 @@ create index if not exists idx_khach_hang_tinh_trang on khach_hang (tinh_trang_h
 create index if not exists idx_khach_hang_ngay_toi_han on khach_hang (ngay_toi_han_gan_nhat);
 
 -- ----------------------------------------------------------------------------
--- 8. Giao dịch
+-- 8. Tiểu khoản  (weak entity — sub-account trực thuộc một Khách hàng)
+-- ----------------------------------------------------------------------------
+create table if not exists tieu_khoan (
+    so_tieu_khoan varchar(50) not null,
+    so_tai_khoan  varchar(50) not null references khach_hang(so_tai_khoan) on delete restrict,
+    constraint tieu_khoan_pkey primary key (so_tieu_khoan, so_tai_khoan),
+    constraint uq_tieu_khoan_so_tieu_khoan unique (so_tieu_khoan)
+);
+
+comment on table tieu_khoan is 'Tiểu khoản (sub-account), trực thuộc một Khách hàng (Số tài khoản)';
+
+create index if not exists idx_tieu_khoan_so_tai_khoan on tieu_khoan (so_tai_khoan);
+
+-- ----------------------------------------------------------------------------
+-- 9. Giao dịch  (FK -> Tiểu khoản, không tham chiếu Khách hàng trực tiếp)
 -- ----------------------------------------------------------------------------
 create table if not exists giao_dich (
     ma_giao_dich          varchar(100) primary key,
-    ma_khach_hang         varchar(50) not null references khach_hang(ma_khach_hang) on delete restrict,
+    so_tieu_khoan         varchar(50) not null references tieu_khoan(so_tieu_khoan) on delete restrict,
     ma_nguoi_quan_ly      varchar(50) references nguoi_quan_ly(ma_nguoi_quan_ly_ctv) on delete restrict,
     gia_tri_giao_dich     numeric(18,2) check (gia_tri_giao_dich >= 0),
     giao_dich_mua_ban     smallint not null check (giao_dich_mua_ban in (1, 2)), -- 1: Mua, 2: Bán
@@ -154,18 +172,18 @@ create table if not exists giao_dich (
 
 comment on table giao_dich is 'Giao dịch (1: Mua, 2: Bán)';
 
-create index if not exists idx_giao_dich_khach_hang on giao_dich (ma_khach_hang);
+create index if not exists idx_giao_dich_so_tieu_khoan on giao_dich (so_tieu_khoan);
 create index if not exists idx_giao_dich_nguoi_quan_ly on giao_dich (ma_nguoi_quan_ly);
 create index if not exists idx_giao_dich_ma_cp on giao_dich (ma_cp);
 create index if not exists idx_giao_dich_ngay on giao_dich (ngay_giao_dich);
 
 -- ----------------------------------------------------------------------------
--- 9. Phí gia hạn
+-- 10. Phí gia hạn  (FK -> Khách hàng.Số tài khoản)
 -- ----------------------------------------------------------------------------
 create table if not exists phi_gia_han (
     id                    bigint generated always as identity primary key,
     ngay                  date not null,
-    ma_khach_hang         varchar(50) not null references khach_hang(ma_khach_hang) on delete restrict,
+    ma_khach_hang         varchar(50) not null references khach_hang(so_tai_khoan) on delete restrict,
     phi_gia_han_du_thu    numeric(18,2) default 0 check (phi_gia_han_du_thu >= 0),
     phi_gia_han_thuc_thu  numeric(18,2) default 0 check (phi_gia_han_thuc_thu >= 0),
     lai                   numeric(18,2) default 0 check (lai >= 0)
@@ -177,12 +195,12 @@ create index if not exists idx_phi_gia_han_khach_hang on phi_gia_han (ma_khach_h
 create index if not exists idx_phi_gia_han_ngay on phi_gia_han (ngay);
 
 -- ----------------------------------------------------------------------------
--- 10. Báo cáo thu lãi
+-- 11. Báo cáo thu lãi  (FK -> Khách hàng.Số tài khoản)
 -- ----------------------------------------------------------------------------
 create table if not exists bao_cao_thu_lai (
     id              bigint generated always as identity primary key,
     ngay_thu_lai    date not null,
-    ma_khach_hang   varchar(50) not null references khach_hang(ma_khach_hang) on delete restrict,
+    ma_khach_hang   varchar(50) not null references khach_hang(so_tai_khoan) on delete restrict,
     lai_vay         numeric(18,2) default 0 check (lai_vay >= 0),
     lai_ung_truoc   numeric(18,2) default 0 check (lai_ung_truoc >= 0)
 );

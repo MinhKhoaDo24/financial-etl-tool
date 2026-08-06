@@ -111,6 +111,30 @@ def _extract_date_from_text(text, label):
     return m.group(1) if m else None
 
 
+def _to_iso_date(val):
+    """
+    Converts a VN 'DD/MM/YYYY' date string to ISO 'YYYY-MM-DD' for safe SQL literals.
+    Postgres' default DateStyle (MDY) would misparse '30/07/2026' — returns None
+    (-> SQL NULL) when the value can't be confidently parsed, rather than emitting
+    something that silently swaps day/month.
+    """
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', s)
+    if m:
+        d, mo, y = m.groups()
+        try:
+            return f"{y}-{int(mo):02d}-{int(d):02d}"
+        except ValueError:
+            return None
+    if re.match(r'^\d{4}-\d{1,2}-\d{1,2}$', s):
+        return s
+    return None
+
+
 def _load_excel_rows(file_bytes_or_path):
     """Loads a single-sheet .xls/.xlsx report (bytes or path) into a list-of-rows matrix."""
     if isinstance(file_bytes_or_path, bytes):
@@ -156,6 +180,10 @@ def _detect_excel_report_type(rows_data):
 # ────────────────────────────────────────────────────────────────────────────
 # Parser: "Kết quả khớp lệnh và phí giao dịch" style report
 # (e.g. "Bao cao giao dich *.xls" — one row per sub-account/symbol match)
+#
+# This report only exposes one account-level code ("Số tiểu khoản" column), so
+# there is no separate parent "Số tài khoản" — the sub-account IS the account
+# (parent_acc == sub_acc).
 # ────────────────────────────────────────────────────────────────────────────
 
 def _parse_trade_result_rows(rows_data, filename=""):
@@ -211,7 +239,7 @@ def _parse_trade_result_rows(rows_data, filename=""):
         if not shl_val or len(shl_val) < 3:
             continue
 
-        sub_acc = str(_cell(r, col_indices.get('sub_acc', 2))).strip()
+        sub_acc = str(_cell(r, col_indices.get('sub_acc', 2))).strip() or 'TK_DEFAULT'
         cust_name = str(_cell(r, col_indices.get('cust_name', 3))).strip()
         symbol = str(_cell(r, col_indices.get('symbol', 4))).strip()
 
@@ -235,7 +263,8 @@ def _parse_trade_result_rows(rows_data, filename=""):
             'company': company_name,
             'company_code': 'EXCEL_CO',
             'shl': shl_val,
-            'sub_acc': sub_acc or 'TK_DEFAULT',
+            'sub_acc': sub_acc,
+            'parent_acc': sub_acc,      # report has no separate account/sub-account split
             'cust_name': cust_name or 'Khách hàng',
             'symbol': symbol or 'VNINDEX',
             'buy_qty_matched': buy_qty_matched,
@@ -258,6 +287,9 @@ def _parse_trade_result_rows(rows_data, filename=""):
 # Parser: "Lịch sử đặt lệnh" (order history) report — e.g. PBSV.xlsx
 # One row per order attempt; only rows with Trạng thái == 'Hoàn thành' are real,
 # settled transactions — 'Đã sửa' / 'Đã hủy' rows must be discarded.
+#
+# This report DOES expose two levels: a "Số tài khoản: XXX" account in the header,
+# and a "Tiểu khoản" column per row (sub-account under that account).
 # ────────────────────────────────────────────────────────────────────────────
 
 def _parse_order_history_rows(rows_data, filename=""):
@@ -337,7 +369,8 @@ def _parse_order_history_rows(rows_data, filename=""):
         if val <= 0 and qty <= 0:
             continue
 
-        sub_acc = f"{account_number}-{tieu_khoan}" if account_number else (tieu_khoan or 'TK_DEFAULT')
+        parent_acc = account_number or (tieu_khoan or 'TK_DEFAULT')
+        sub_acc = f"{parent_acc}-{tieu_khoan}" if tieu_khoan else parent_acc
         is_buy = 'mua' in side.lower()
 
         tx_rows.append({
@@ -346,7 +379,8 @@ def _parse_order_history_rows(rows_data, filename=""):
             'company_code': 'EXCEL_CO',
             'shl': order_id,
             'sub_acc': sub_acc,
-            'cust_name': f"Khách hàng {account_number}" if account_number else 'Khách hàng',
+            'parent_acc': parent_acc,
+            'cust_name': f"Khách hàng {parent_acc}",
             'symbol': symbol or 'VNINDEX',
             'buy_qty_matched': qty if is_buy else 0.0,
             'buy_price_avg': price if is_buy else 0.0,
@@ -438,6 +472,7 @@ def parse_pdf_data(file_bytes_or_path, filename=""):
                             'company': company_name,
                             'company_code': 'PDF_CO',
                             'sub_acc': sub_acc,
+                            'parent_acc': sub_acc,   # report exposes only one account-level code
                             'cust_name': cust_name,
                             'symbol': symbol,
                             'buy_val': buy_val,
@@ -454,8 +489,14 @@ def parse_pdf_data(file_bytes_or_path, filename=""):
 
 def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
     """
-    Transforms extracted Excel and/or PDF data into the 10 relational tables defined in Data Model.jpg
+    Transforms extracted Excel and/or PDF data into the 11 relational tables defined in
+    DATA MODEL.png: Cong_ty_chung_khoan, Nguoi_quan_ly, Chinh_sach, Phan_loai_khach_hang,
+    Nhom_khach_hang, Khach_hang, Tieu_khoan, Co_phieu, Giao_dich, Phi_gia_han, Bao_cao_thu_lai.
     Works with ANY single list or combination of lists.
+
+    Khach_hang is keyed by 'Số tài khoản' (the account holder). Tieu_khoan is the new
+    weak entity — one or more sub-accounts ('Số tiểu khoản') per Khách hàng — and
+    Giao_dich now references Tieu_khoan, not Khách hàng directly.
     """
     excel_tx_list = excel_tx_list or []
     pdf_tx_list = pdf_tx_list or []
@@ -589,11 +630,13 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
         }
     ])
 
-    # 4. Khách hàng
+    # 4. Khách hàng (PK = Số tài khoản) — keyed by parent_acc, so several Tiểu khoản
+    #    (sub_acc) that share the same parent account collapse into ONE customer row.
     customers_dict = {}
     for r in all_tx_raw:
         sub_acc = r.get('sub_acc', 'TK_DEFAULT')
-        if sub_acc not in customers_dict:
+        parent_acc = r.get('parent_acc') or sub_acc
+        if parent_acc not in customers_dict:
             co_id = company_map.get(r.get('company'), {}).get('ID', 1)
             mgr_code = 'NQL_DEF'
             if r.get('ctv'): mgr_code = r['ctv'].split('-')[0]
@@ -603,10 +646,9 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
             is_org = "CÔNG TY" in r.get('cust_name', '').upper() or "TNHH" in r.get('cust_name', '').upper()
             cust_type = 'LKH02' if is_org else 'LKH01'
 
-            customers_dict[sub_acc] = {
-                'Mã khách hàng': sub_acc,
+            customers_dict[parent_acc] = {
+                'Số tài khoản': parent_acc,
                 'Tên khách hàng': r.get('cust_name', 'Khách hàng'),
-                'Số tài khoản': sub_acc,
                 'Mã công ty chứng khoán': co_id,
                 'Mã loại khách hàng': cust_type,
                 'Mã nhóm khách hàng': 'NKH01',
@@ -622,7 +664,19 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
 
     df_customer = pd.DataFrame(list(customers_dict.values()))
 
-    # 5. Cổ phiếu
+    # 5. Tiểu khoản (weak entity, PK = Số tiểu khoản + Số tài khoản)
+    tieu_khoan_dict = {}
+    for r in all_tx_raw:
+        sub_acc = r.get('sub_acc', 'TK_DEFAULT')
+        parent_acc = r.get('parent_acc') or sub_acc
+        if sub_acc not in tieu_khoan_dict:
+            tieu_khoan_dict[sub_acc] = {
+                'Số tiểu khoản': sub_acc,
+                'Số tài khoản': parent_acc
+            }
+    df_tieu_khoan = pd.DataFrame(list(tieu_khoan_dict.values()))
+
+    # 6. Cổ phiếu
     stocks_dict = {}
     for r in all_tx_raw:
         sym = r.get('symbol', 'VNINDEX')
@@ -636,7 +690,7 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
             }
     df_stock = pd.DataFrame(list(stocks_dict.values()))
 
-    # 6. Giao dịch
+    # 7. Giao dịch (FK -> Tiểu khoản.Số tiểu khoản, not Khách hàng directly)
     tx_list = []
 
     # Excel transactions (both "trade_result" and "order_history" rows share this shape)
@@ -648,7 +702,7 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
         if r.get('buy_val', 0) > 0 or r.get('buy_qty_matched', 0) > 0:
             tx_list.append({
                 'Mã giao dịch': r['shl'],
-                'Mã khách hàng': r['sub_acc'],
+                'Số tiểu khoản': r['sub_acc'],
                 'Mã người quản lý': mgr_code,
                 'Giá trị giao dịch': r['buy_val'],
                 'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 1,
@@ -663,7 +717,7 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
         if r.get('sell_val', 0) > 0 or r.get('sell_qty_matched', 0) > 0:
             tx_list.append({
                 'Mã giao dịch': r['shl'],
-                'Mã khách hàng': r['sub_acc'],
+                'Số tiểu khoản': r['sub_acc'],
                 'Mã người quản lý': mgr_code,
                 'Giá trị giao dịch': r['sell_val'],
                 'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 2,
@@ -687,7 +741,7 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
             pdf_seq += 1
             tx_list.append({
                 'Mã giao dịch': f"{sub_acc}{symbol}{str(pdf_seq).zfill(4)}",
-                'Mã khách hàng': sub_acc,
+                'Số tiểu khoản': sub_acc,
                 'Mã người quản lý': mgr_code,
                 'Giá trị giao dịch': r['buy_val'],
                 'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 1,
@@ -703,7 +757,7 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
             pdf_seq += 1
             tx_list.append({
                 'Mã giao dịch': f"{sub_acc}{symbol}{str(pdf_seq).zfill(4)}",
-                'Mã khách hàng': sub_acc,
+                'Số tiểu khoản': sub_acc,
                 'Mã người quản lý': mgr_code,
                 'Giá trị giao dịch': r['sell_val'],
                 'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 2,
@@ -716,22 +770,21 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
             })
 
     df_giao_dich = pd.DataFrame(tx_list) if tx_list else pd.DataFrame(columns=[
-        'Mã giao dịch', 'Mã khách hàng', 'Mã người quản lý', 'Giá trị giao dịch',
+        'Mã giao dịch', 'Số tiểu khoản', 'Mã người quản lý', 'Giá trị giao dịch',
         'Giao dịch Mua/Bán (1: Mua, 2: Bán)', 'Mã CP', 'Thuế bán', 'Ngày giao dịch',
         'Phí net', 'Khối lượng giao dịch', 'Giá giao dịch'
     ])
 
-    # 7. Phí gia hạn & 8. Báo cáo thu lãi
-    first_cust_id = df_customer.iloc[0]['Mã khách hàng'] if not df_customer.empty else 'TK_DEFAULT'
-    df_phi_gia_han = pd.DataFrame([{
-        'ID': 1, 'Ngày': '', 'Mã khách hàng': first_cust_id,
-        'Phí gia hạn dự thu': 0.0, 'Phí gia hạn thực thu': 0.0, 'Lãi': 0.0
-    }])
-
-    df_bao_cao_thu_lai = pd.DataFrame([{
-        'ID': 1, 'Ngày thu lãi': '', 'Mã khách hàng': first_cust_id,
-        'Lãi vay': 0.0, 'Lãi ứng trước': 0.0
-    }])
+    # 8. Phí gia hạn & 9. Báo cáo thu lãi
+    # No source report supplies phí gia hạn / lãi thu data — leave these empty with
+    # the correct columns rather than fabricating a fake all-zero placeholder row
+    # that the user would just have to notice and delete by hand.
+    df_phi_gia_han = pd.DataFrame(columns=[
+        'ID', 'Ngày', 'Mã khách hàng', 'Phí gia hạn dự thu', 'Phí gia hạn thực thu', 'Lãi'
+    ])
+    df_bao_cao_thu_lai = pd.DataFrame(columns=[
+        'ID', 'Ngày thu lãi', 'Mã khách hàng', 'Lãi vay', 'Lãi ứng trước'
+    ])
 
     return {
         'Cong_ty_chung_khoan': df_company,
@@ -740,6 +793,7 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
         'Phan_loai_khach_hang': df_phan_loai_kh,
         'Nhom_khach_hang': df_nhom_kh,
         'Khach_hang': df_customer,
+        'Tieu_khoan': df_tieu_khoan,
         'Co_phieu': df_stock,
         'Giao_dich': df_giao_dich,
         'Phi_gia_han': df_phi_gia_han,
@@ -755,6 +809,7 @@ def build_master_flat_table(db_tables):
     """
     df_gd  = db_tables.get('Giao_dich', pd.DataFrame()).copy()
     df_kh  = db_tables.get('Khach_hang', pd.DataFrame()).copy()
+    df_tk  = db_tables.get('Tieu_khoan', pd.DataFrame()).copy()
     df_nql = db_tables.get('Nguoi_quan_ly', pd.DataFrame()).copy()
     df_co  = db_tables.get('Cong_ty_chung_khoan', pd.DataFrame()).copy()
     df_cp  = db_tables.get('Co_phieu', pd.DataFrame()).copy()
@@ -763,12 +818,12 @@ def build_master_flat_table(db_tables):
         return pd.DataFrame()
 
     # ── Detect column naming convention ──────────────────────────────
-    # ETL-generated:   'Mã khách hàng', 'Mã người quản lý', 'Mã CP', ...
+    # ETL-generated:   'Số tiểu khoản', 'Mã người quản lý', 'Mã CP', ...
     # PBSV multi-sheet: 'Mã KH (FK)', 'Mã người QL (FK)', 'Mã CP (FK)', ...
     is_pbsv = 'Mã KH (FK)' in df_gd.columns
 
-    # ── Rename PBSV columns → canonical names for joining ─────────────
     if is_pbsv:
+        # ── Rename PBSV columns → canonical names for joining ─────────
         gd_rename = {
             'Mã KH (FK)':        'Mã khách hàng',
             'Tên KH':            'Tên khách hàng_gd',  # keep separately
@@ -815,17 +870,25 @@ def build_master_flat_table(db_tables):
             df_gd = pd.merge(df_gd, nql_lookup, left_on='_mgr_fk', right_on='ID', how='left')
             df_gd.rename(columns={'Mã người quản lý/CTV': 'Mã người quản lý'}, inplace=True)
             df_gd.drop(columns=['_mgr_fk', 'ID'], errors='ignore', inplace=True)
-    else:
-        # ETL format: Mã người quản lý is already in df_gd directly
-        pass
 
-    # ── Merge Giao_dich ← Khach_hang ─────────────────────────────────
-    if 'Mã khách hàng' in df_gd.columns and 'Mã khách hàng' in df_kh.columns:
-        kh_cols_to_keep = [c for c in df_kh.columns
-                           if c not in df_gd.columns or c == 'Mã khách hàng']
-        master_df = pd.merge(df_gd, df_kh[kh_cols_to_keep], on='Mã khách hàng', how='left')
+        # ── Merge Giao_dich ← Khach_hang (legacy PBSV convention: direct FK) ──
+        if 'Mã khách hàng' in df_gd.columns and 'Mã khách hàng' in df_kh.columns:
+            kh_cols_to_keep = [c for c in df_kh.columns
+                               if c not in df_gd.columns or c == 'Mã khách hàng']
+            master_df = pd.merge(df_gd, df_kh[kh_cols_to_keep], on='Mã khách hàng', how='left')
+        else:
+            master_df = df_gd.copy()
     else:
-        master_df = df_gd.copy()
+        # ── ETL convention: Giao_dich.Số tiểu khoản -> Tiểu khoản -> Khách hàng.Số tài khoản ──
+        if 'Số tiểu khoản' in df_gd.columns and 'Số tiểu khoản' in df_tk.columns:
+            master_df = pd.merge(df_gd, df_tk, on='Số tiểu khoản', how='left')
+        else:
+            master_df = df_gd.copy()
+
+        if 'Số tài khoản' in master_df.columns and 'Số tài khoản' in df_kh.columns:
+            kh_cols_to_keep = [c for c in df_kh.columns
+                               if c not in master_df.columns or c == 'Số tài khoản']
+            master_df = pd.merge(master_df, df_kh[kh_cols_to_keep], on='Số tài khoản', how='left')
 
     # ── Merge ← Nguoi_quan_ly ────────────────────────────────────────
     if 'Mã người quản lý' in master_df.columns and 'Mã người quản lý/CTV' in df_nql.columns:
@@ -878,10 +941,10 @@ def build_master_flat_table(db_tables):
     # ── Preferred column order (only include columns that exist) ──────
     preferred = [
         'Mã giao dịch', 'Ngày giao dịch', 'Giao dịch Mua/Bán (1: Mua, 2: Bán)',
-        'Mã khách hàng', 'Tên khách hàng', 'Số tài khoản',
+        'Số tiểu khoản', 'Số tài khoản', 'Tên khách hàng',
         'Mã CP', 'Tên doanh nghiệp', 'Giá trị giao dịch',
         'Khối lượng giao dịch', 'Giá giao dịch', 'Thuế bán', 'Phí net',
-        'Mã người quản lý', 'Mã người quản lý/CTV', 'Tên người quản lý/CTV',
+        'Mã người quản lý/CTV', 'Tên người quản lý/CTV',
         'Loại người quản lý (quản lý/CTV)',
         'Mã định danh công ty', 'Tên công ty',
         'Mã loại khách hàng', 'Mã nhóm khách hàng',
@@ -896,39 +959,176 @@ def build_master_flat_table(db_tables):
     return master_df[final_cols + extra].reset_index(drop=True)
 
 
-def generate_sql_script(db_tables):
-    """Generates SQL DDL and DML statements for PostgreSQL / Supabase."""
-    sql_lines = ["-- SQL Script generated by Streamlit Data Engineering Tool\n"]
-    table_ddl = {
-        'Cong_ty_chung_khoan': "CREATE TABLE IF NOT EXISTS Cong_ty_chung_khoan (id SERIAL PRIMARY KEY, ma_dinh_danh_cong_ty VARCHAR(50), ten_cong_ty VARCHAR(255));",
-        'Nguoi_quan_ly': "CREATE TABLE IF NOT EXISTS Nguoi_quan_ly (id SERIAL PRIMARY KEY, ma_nguoi_quan_ly_ctv VARCHAR(50) UNIQUE, ten_nguoi_quan_ly_ctv VARCHAR(255), loai_nguoi_quan_ly VARCHAR(50), ma_cong_ty_chung_khoan INT REFERENCES Cong_ty_chung_khoan(id), tinh_trang_hoat_dong INT DEFAULT 1);",
-        'Chinh_sach': "CREATE TABLE IF NOT EXISTS Chinh_sach (ma_chinh_sach VARCHAR(50) PRIMARY KEY, ten_chinh_sach VARCHAR(255), lai_suat NUMERIC(10,4), phi_giao_dich NUMERIC(10,4), phi_ung_truoc NUMERIC(10,4), phi_gia_han NUMERIC(10,4), lai_gia_han NUMERIC(10,4), thoi_han INT, han_muc_tong NUMERIC(18,2), ty_le_vay NUMERIC(10,4));",
-        'Phan_loai_khach_hang': "CREATE TABLE IF NOT EXISTS Phan_loai_khach_hang (ma_loai_khach_hang VARCHAR(50) PRIMARY KEY, ten_loai_khach_hang VARCHAR(255), phan_loai VARCHAR(100), mo_ta TEXT, ma_chinh_sach VARCHAR(50) REFERENCES Chinh_sach(ma_chinh_sach));",
-        'Nhom_khach_hang': "CREATE TABLE IF NOT EXISTS Nhom_khach_hang (ma_nhom_khach_hang VARCHAR(50) PRIMARY KEY, ten_nhom_khach_hang VARCHAR(255), phan_nhom VARCHAR(100), ma_chinh_sach VARCHAR(50) REFERENCES Chinh_sach(ma_chinh_sach), mo_ta TEXT);",
-        'Khach_hang': "CREATE TABLE IF NOT EXISTS Khach_hang (ma_khach_hang VARCHAR(50) PRIMARY KEY, ten_khach_hang VARCHAR(255), so_tai_khoan VARCHAR(50), ma_cong_ty_chung_khoan INT REFERENCES Cong_ty_chung_khoan(id), ma_loai_khach_hang VARCHAR(50) REFERENCES Phan_loai_khach_hang(ma_loai_khach_hang), ma_nhom_khach_hang VARCHAR(50) REFERENCES Nhom_khach_hang(ma_nhom_khach_hang), ma_nguoi_quan_ly VARCHAR(50) REFERENCES Nguoi_quan_ly(ma_nguoi_quan_ly_ctv), nav NUMERIC(18,2) DEFAULT 0, du_no_goc NUMERIC(18,2) DEFAULT 0, du_no_lai NUMERIC(18,2) DEFAULT 0, ngay_toi_han_gan_nhat DATE, ghi_chu TEXT, tinh_trang_hoat_dong INT DEFAULT 1, tong_du_no NUMERIC(18,2) DEFAULT 0);",
-        'Co_phieu': "CREATE TABLE IF NOT EXISTS Co_phieu (ma_co_phieu VARCHAR(20) PRIMARY KEY, ten_doanh_nghiep VARCHAR(255), gia_mo_cua_ngay_giao_dich_gan_nhat NUMERIC(18,2), gia_dong_cua_ngay_giao_dich_gan_nhat NUMERIC(18,2));",
-        'Giao_dich': "CREATE TABLE IF NOT EXISTS Giao_dich (ma_giao_dich VARCHAR(100) PRIMARY KEY, ma_khach_hang VARCHAR(50) REFERENCES Khach_hang(ma_khach_hang), ma_nguoi_quan_ly VARCHAR(50) REFERENCES Nguoi_quan_ly(ma_nguoi_quan_ly_ctv), gia_tri_giao_dich NUMERIC(18,2), giao_dich_mua_ban INT, ma_cp VARCHAR(20) REFERENCES Co_phieu(ma_co_phieu), thue_ban NUMERIC(18,2), ngay_giao_dich VARCHAR(50), phi_net NUMERIC(18,2), khoi_luong_giao_dich NUMERIC(18,2), gia_giao_dich NUMERIC(18,2));",
-        'Phi_gia_han': "CREATE TABLE IF NOT EXISTS Phi_gia_han (id SERIAL PRIMARY KEY, ngay VARCHAR(50), ma_khach_hang VARCHAR(50) REFERENCES Khach_hang(ma_khach_hang), phi_gia_han_du_thu NUMERIC(18,2), phi_gia_han_thuc_thu NUMERIC(18,2), lai NUMERIC(18,2));",
-        'Bao_cao_thu_lai': "CREATE TABLE IF NOT EXISTS Bao_cao_thu_lai (id SERIAL PRIMARY KEY, ngay_thu_lai VARCHAR(50), ma_khach_hang VARCHAR(50) REFERENCES Khach_hang(ma_khach_hang), lai_vay NUMERIC(18,2), lai_ung_truoc NUMERIC(18,2));"
-    }
+# ────────────────────────────────────────────────────────────────────────────
+# SQL generation — mirrors supabase_schema.sql exactly (table names, column
+# names/types, PK/FK relationships) so the generated INSERTs actually run
+# against a database created from that script.
+# ────────────────────────────────────────────────────────────────────────────
 
-    for tbl_name, ddl in table_ddl.items():
+# Each entry: (table_name, CREATE TABLE ddl, {Vietnamese label -> sql column}, {date columns}, needs_identity_override)
+_TABLE_DEFS = [
+    (
+        'Cong_ty_chung_khoan',
+        "CREATE TABLE IF NOT EXISTS Cong_ty_chung_khoan ("
+        "id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, "
+        "ma_dinh_danh_cong_ty VARCHAR(50), ten_cong_ty VARCHAR(255));",
+        {'ID': 'id', 'Mã định danh công ty': 'ma_dinh_danh_cong_ty', 'Tên công ty': 'ten_cong_ty'},
+        set(), True,
+    ),
+    (
+        'Chinh_sach',
+        "CREATE TABLE IF NOT EXISTS Chinh_sach ("
+        "ma_chinh_sach VARCHAR(50) PRIMARY KEY, ten_chinh_sach VARCHAR(255), "
+        "lai_suat NUMERIC(10,4), phi_giao_dich NUMERIC(10,4), phi_ung_truoc NUMERIC(10,4), "
+        "phi_gia_han NUMERIC(10,4), lai_gia_han NUMERIC(10,4), thoi_han INT, "
+        "han_muc_tong NUMERIC(18,2), ty_le_vay NUMERIC(10,4));",
+        {'Mã chính sách': 'ma_chinh_sach', 'Tên chính sách': 'ten_chinh_sach', 'Lãi suất': 'lai_suat',
+         'Phí giao dịch': 'phi_giao_dich', 'Phí ứng trước': 'phi_ung_truoc', 'Phí gia hạn': 'phi_gia_han',
+         'Lãi gia hạn': 'lai_gia_han', 'Thời hạn': 'thoi_han', 'Hạn mức tổng': 'han_muc_tong',
+         'Tỷ lệ vay': 'ty_le_vay'},
+        set(), False,
+    ),
+    (
+        'Nguoi_quan_ly',
+        "CREATE TABLE IF NOT EXISTS Nguoi_quan_ly ("
+        "id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, ma_nguoi_quan_ly_ctv VARCHAR(50) UNIQUE, "
+        "ten_nguoi_quan_ly_ctv VARCHAR(255), loai_nguoi_quan_ly VARCHAR(50), "
+        "ma_cong_ty_chung_khoan BIGINT REFERENCES Cong_ty_chung_khoan(id), "
+        "tinh_trang_hoat_dong SMALLINT DEFAULT 1);",
+        {'ID': 'id', 'Mã người quản lý/CTV': 'ma_nguoi_quan_ly_ctv', 'Tên người quản lý/CTV': 'ten_nguoi_quan_ly_ctv',
+         'Loại người quản lý (quản lý/CTV)': 'loai_nguoi_quan_ly', 'Mã công ty chứng khoán': 'ma_cong_ty_chung_khoan',
+         'Tình trạng hoạt động (1: có, 0: không)': 'tinh_trang_hoat_dong'},
+        set(), True,
+    ),
+    (
+        'Phan_loai_khach_hang',
+        "CREATE TABLE IF NOT EXISTS Phan_loai_khach_hang ("
+        "ma_loai_khach_hang VARCHAR(50) PRIMARY KEY, ten_loai_khach_hang VARCHAR(255), "
+        "phan_loai VARCHAR(100), mo_ta TEXT, ma_chinh_sach VARCHAR(50) REFERENCES Chinh_sach(ma_chinh_sach));",
+        {'Mã loại khách hàng': 'ma_loai_khach_hang', 'Tên loại khách hàng': 'ten_loai_khach_hang',
+         'Phân loại': 'phan_loai', 'Mô tả': 'mo_ta', 'Mã chính sách': 'ma_chinh_sach'},
+        set(), False,
+    ),
+    (
+        'Nhom_khach_hang',
+        "CREATE TABLE IF NOT EXISTS Nhom_khach_hang ("
+        "ma_nhom_khach_hang VARCHAR(50) PRIMARY KEY, ten_nhom_khach_hang VARCHAR(255), "
+        "phan_nhom VARCHAR(100), ma_chinh_sach VARCHAR(50) REFERENCES Chinh_sach(ma_chinh_sach), mo_ta TEXT);",
+        {'Mã nhóm khách hàng': 'ma_nhom_khach_hang', 'Tên nhóm khách hàng': 'ten_nhom_khach_hang',
+         'Phân nhóm': 'phan_nhom', 'Mã chính sách': 'ma_chinh_sach', 'Mô tả': 'mo_ta'},
+        set(), False,
+    ),
+    (
+        'Co_phieu',
+        "CREATE TABLE IF NOT EXISTS Co_phieu ("
+        "ma_co_phieu VARCHAR(20) PRIMARY KEY, ten_doanh_nghiep VARCHAR(255), "
+        "gia_mo_cua_ngay_giao_dich_gan_nhat NUMERIC(18,2), gia_dong_cua_ngay_giao_dich_gan_nhat NUMERIC(18,2));",
+        {'Mã cổ phiếu': 'ma_co_phieu', 'Tên doanh nghiệp': 'ten_doanh_nghiep',
+         'Giá mở cửa ngày giao dịch gần nhất': 'gia_mo_cua_ngay_giao_dich_gan_nhat',
+         'Giá đóng cửa ngày giao dịch gần nhất': 'gia_dong_cua_ngay_giao_dich_gan_nhat'},
+        set(), False,
+    ),
+    (
+        'Khach_hang',
+        "CREATE TABLE IF NOT EXISTS Khach_hang ("
+        "so_tai_khoan VARCHAR(50) PRIMARY KEY, ten_khach_hang VARCHAR(255), "
+        "ma_cong_ty_chung_khoan BIGINT REFERENCES Cong_ty_chung_khoan(id), "
+        "ma_loai_khach_hang VARCHAR(50) REFERENCES Phan_loai_khach_hang(ma_loai_khach_hang), "
+        "ma_nhom_khach_hang VARCHAR(50) REFERENCES Nhom_khach_hang(ma_nhom_khach_hang), "
+        "ma_nguoi_quan_ly VARCHAR(50) REFERENCES Nguoi_quan_ly(ma_nguoi_quan_ly_ctv), "
+        "nav NUMERIC(18,2) DEFAULT 0, du_no_goc NUMERIC(18,2) DEFAULT 0, du_no_lai NUMERIC(18,2) DEFAULT 0, "
+        "ngay_toi_han_gan_nhat DATE, ghi_chu TEXT, tinh_trang_hoat_dong SMALLINT DEFAULT 1, "
+        "tong_du_no NUMERIC(18,2) DEFAULT 0);",
+        {'Số tài khoản': 'so_tai_khoan', 'Tên khách hàng': 'ten_khach_hang',
+         'Mã công ty chứng khoán': 'ma_cong_ty_chung_khoan', 'Mã loại khách hàng': 'ma_loai_khach_hang',
+         'Mã nhóm khách hàng': 'ma_nhom_khach_hang', 'Mã người quản lý': 'ma_nguoi_quan_ly',
+         'NAV': 'nav', 'Dư nợ gốc': 'du_no_goc', 'Dư nợ lãi': 'du_no_lai',
+         'Ngày tới hạn gần nhất': 'ngay_toi_han_gan_nhat', 'Ghi chú': 'ghi_chu',
+         'Tình trạng hoạt động (1: có, 0: không)': 'tinh_trang_hoat_dong', 'Tổng dư nợ': 'tong_du_no'},
+        {'ngay_toi_han_gan_nhat'}, False,
+    ),
+    (
+        'Tieu_khoan',
+        "CREATE TABLE IF NOT EXISTS Tieu_khoan ("
+        "so_tieu_khoan VARCHAR(50) NOT NULL, "
+        "so_tai_khoan VARCHAR(50) NOT NULL REFERENCES Khach_hang(so_tai_khoan), "
+        "PRIMARY KEY (so_tieu_khoan, so_tai_khoan), UNIQUE (so_tieu_khoan));",
+        {'Số tiểu khoản': 'so_tieu_khoan', 'Số tài khoản': 'so_tai_khoan'},
+        set(), False,
+    ),
+    (
+        'Giao_dich',
+        "CREATE TABLE IF NOT EXISTS Giao_dich ("
+        "ma_giao_dich VARCHAR(100) PRIMARY KEY, so_tieu_khoan VARCHAR(50) REFERENCES Tieu_khoan(so_tieu_khoan), "
+        "ma_nguoi_quan_ly VARCHAR(50) REFERENCES Nguoi_quan_ly(ma_nguoi_quan_ly_ctv), "
+        "gia_tri_giao_dich NUMERIC(18,2), giao_dich_mua_ban SMALLINT, "
+        "ma_cp VARCHAR(20) REFERENCES Co_phieu(ma_co_phieu), thue_ban NUMERIC(18,2), "
+        "ngay_giao_dich DATE, phi_net NUMERIC(18,2), khoi_luong_giao_dich NUMERIC(18,2), "
+        "gia_giao_dich NUMERIC(18,2));",
+        {'Mã giao dịch': 'ma_giao_dich', 'Số tiểu khoản': 'so_tieu_khoan', 'Mã người quản lý': 'ma_nguoi_quan_ly',
+         'Giá trị giao dịch': 'gia_tri_giao_dich', 'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 'giao_dich_mua_ban',
+         'Mã CP': 'ma_cp', 'Thuế bán': 'thue_ban', 'Ngày giao dịch': 'ngay_giao_dich', 'Phí net': 'phi_net',
+         'Khối lượng giao dịch': 'khoi_luong_giao_dich', 'Giá giao dịch': 'gia_giao_dich'},
+        {'ngay_giao_dich'}, False,
+    ),
+    (
+        'Phi_gia_han',
+        "CREATE TABLE IF NOT EXISTS Phi_gia_han ("
+        "id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, ngay DATE, "
+        "ma_khach_hang VARCHAR(50) REFERENCES Khach_hang(so_tai_khoan), "
+        "phi_gia_han_du_thu NUMERIC(18,2), phi_gia_han_thuc_thu NUMERIC(18,2), lai NUMERIC(18,2));",
+        {'ID': 'id', 'Ngày': 'ngay', 'Mã khách hàng': 'ma_khach_hang', 'Phí gia hạn dự thu': 'phi_gia_han_du_thu',
+         'Phí gia hạn thực thu': 'phi_gia_han_thuc_thu', 'Lãi': 'lai'},
+        {'ngay'}, True,
+    ),
+    (
+        'Bao_cao_thu_lai',
+        "CREATE TABLE IF NOT EXISTS Bao_cao_thu_lai ("
+        "id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, ngay_thu_lai DATE, "
+        "ma_khach_hang VARCHAR(50) REFERENCES Khach_hang(so_tai_khoan), "
+        "lai_vay NUMERIC(18,2), lai_ung_truoc NUMERIC(18,2));",
+        {'ID': 'id', 'Ngày thu lãi': 'ngay_thu_lai', 'Mã khách hàng': 'ma_khach_hang',
+         'Lãi vay': 'lai_vay', 'Lãi ứng trước': 'lai_ung_truoc'},
+        {'ngay_thu_lai'}, True,
+    ),
+]
+
+
+def generate_sql_script(db_tables):
+    """
+    Generates SQL DDL + DML statements for PostgreSQL / Supabase, matching the
+    table/column names used in supabase_schema.sql exactly (so the INSERTs work
+    whether run against these CREATE TABLE IF NOT EXISTS statements or against a
+    database already provisioned from supabase_schema.sql).
+    """
+    sql_lines = ["-- SQL Script generated by Streamlit Data Engineering Tool\n"]
+
+    for tbl_name, ddl, col_map, date_cols, needs_override in _TABLE_DEFS:
         sql_lines.append(f"-- Table: {tbl_name}\n{ddl}")
         df = db_tables.get(tbl_name)
         if df is not None and not df.empty:
-            cols = [c.lower().replace(' ', '_').replace('/', '_').replace('(', '').replace(')', '').replace(':', '') for c in df.columns]
-            col_str = ", ".join(cols)
-            for _, r in df.iterrows():
+            sql_cols = [col_map.get(c, c.lower().replace(' ', '_')) for c in df.columns]
+            col_str = ", ".join(sql_cols)
+            override_clause = "OVERRIDING SYSTEM VALUE " if needs_override and 'id' in sql_cols else ""
+
+            for _, row in df.iterrows():
                 vals = []
-                for v in r.values:
-                    if pd.isna(v) or v is None:
+                for col_label, v in zip(df.columns, row.values):
+                    sql_col = col_map.get(col_label)
+                    if pd.isna(v) or v is None or v == '':
                         vals.append("NULL")
+                    elif sql_col in date_cols:
+                        iso = _to_iso_date(v)
+                        vals.append(f"'{iso}'" if iso else "NULL")
                     elif isinstance(v, (int, float)):
                         vals.append(str(v))
                     else:
                         clean_v = str(v).replace("'", "''")
                         vals.append(f"'{clean_v}'")
-                sql_lines.append(f"INSERT INTO {tbl_name} ({col_str}) VALUES ({', '.join(vals)}) ON CONFLICT DO NOTHING;")
+                sql_lines.append(
+                    f"INSERT INTO {tbl_name} ({col_str}) {override_clause}"
+                    f"VALUES ({', '.join(vals)}) ON CONFLICT DO NOTHING;"
+                )
         sql_lines.append("\n")
 
     return "\n".join(sql_lines)

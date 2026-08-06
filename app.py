@@ -60,7 +60,7 @@ st.markdown("""
 DEFAULT_XLS_PATH = os.path.join(os.path.dirname(__file__), "Bao cao giao dich 04.08.26.xls")
 DEFAULT_PDF_PATH = os.path.join(os.path.dirname(__file__), "RE1002 T7 LMH.pdf")
 DEFAULT_PBSV_XLSX_PATH = os.path.join(os.path.dirname(__file__), "PBSV.xlsx")
-DEFAULT_IMG_PATH = os.path.join(os.path.dirname(__file__), "Data Model.jpg")
+DEFAULT_IMG_PATH = os.path.join(os.path.dirname(__file__), "DATA MODEL.png")
 
 # ────────────────────────────────────────────
 # Sidebar
@@ -244,7 +244,7 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ────────────────────────────────────────────
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "✏️ 1. Chỉnh Sửa Bảng Master (Data Model)",
-    "✏️ 2. Chỉnh Sửa Từng Bảng Riêng (10 Entities)",
+    "✏️ 2. Chỉnh Sửa Từng Bảng Riêng (Theo Thực Thể)",
     "🔍 3. Chi Tiết Trích Xuất Thô",
     "📐 4. Sơ Đồ Data Model (ERD)",
     "☁️ 5. Hướng Dẫn Deploy"
@@ -275,7 +275,7 @@ with tab2:
     selected_table = st.selectbox(
         "Chọn bảng cần chỉnh sửa:",
         list(available_tables.keys()),
-        index=min(7, len(available_tables)-1) if available_tables else 0
+        index=min(8, len(available_tables)-1) if available_tables else 0
     )
 
     if selected_table and selected_table in st.session_state.edited_tables:
@@ -320,17 +320,17 @@ with tab4:
     st.subheader("📐 Sơ đồ Schema Relational Data Model")
     if os.path.exists(DEFAULT_IMG_PATH):
         try:
-            st.image(DEFAULT_IMG_PATH, caption="Relational Database Model Schema (Data Model.jpg)", use_container_width=True)
+            st.image(DEFAULT_IMG_PATH, caption="Relational Database Model Schema (DATA MODEL.png)", use_container_width=True)
         except Exception:
-            st.image(DEFAULT_IMG_PATH, caption="Relational Database Model Schema (Data Model.jpg)")
+            st.image(DEFAULT_IMG_PATH, caption="Relational Database Model Schema (DATA MODEL.png)")
     else:
-        st.info("Sơ đồ Data Model.jpg (chỉ hiển thị khi chạy tại local).")
+        st.info("Sơ đồ DATA MODEL.png (chỉ hiển thị khi chạy tại local).")
 
 # ─── TAB 5: Deploy guide ───
 with tab5:
     st.subheader("☁️ Hướng Dẫn Deploy Streamlit Web Tool Công Khai")
     st.markdown("""
-    1. Upload các file (`app.py`, `etl_processor.py`, `requirements.txt`, `Data Model.jpg`) lên **GitHub**.
+    1. Upload các file (`app.py`, `etl_processor.py`, `requirements.txt`, `DATA MODEL.png`) lên **GitHub**.
     2. Đăng nhập [share.streamlit.io](https://share.streamlit.io) bằng tài khoản GitHub.
     3. Chọn **New app** → chọn repository → nhập `app.py` → bấm **Deploy!**
     
