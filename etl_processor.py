@@ -19,20 +19,24 @@ PBSV_SHEET_MAP = {
     'BaoCaoThuLai':     'Bao_cao_thu_lai',
 }
 
+
 def is_multi_sheet_data_model(file_bytes_or_path):
     """
     Returns True if the uploaded xlsx file is a PBSV-style multi-sheet Data Model workbook.
     Detection: at least 4 of the known sheet names match PBSV_SHEET_MAP keys.
+    A workbook merely having >1 sheet is NOT enough — real transaction report exports
+    (e.g. PBSV.xlsx "Lịch sử đặt lệnh") are single-sheet and must NOT be routed here.
     """
     try:
         if isinstance(file_bytes_or_path, bytes):
-            wb = openpyxl.load_workbook(io.BytesIO(file_bytes_or_path), data_only=True)
+            wb = openpyxl.load_workbook(io.BytesIO(file_bytes_or_path), data_only=True, read_only=True)
         else:
-            wb = openpyxl.load_workbook(file_bytes_or_path, data_only=True)
+            wb = openpyxl.load_workbook(file_bytes_or_path, data_only=True, read_only=True)
         matches = sum(1 for s in wb.sheetnames if s in PBSV_SHEET_MAP)
         return matches >= 4
     except Exception:
         return False
+
 
 def parse_multi_sheet_excel(file_bytes_or_path, filename=""):
     """
@@ -52,22 +56,18 @@ def parse_multi_sheet_excel(file_bytes_or_path, filename=""):
         rows = list(ws.iter_rows(values_only=True))
         if not rows:
             continue
-        # First non-null row is the header
         header = [str(c).strip() if c is not None else f"Col{i}" for i, c in enumerate(rows[0])]
         data_rows = []
         for row in rows[1:]:
-            # Skip fully empty rows
             if all(v is None for v in row):
                 continue
             data_rows.append(list(row))
         df = pd.DataFrame(data_rows, columns=header)
-        # Convert datetime objects to string for clean display
         for col in df.columns:
             if df[col].dtype == object:
                 df[col] = df[col].apply(lambda v: v.strftime('%d/%m/%Y') if hasattr(v, 'strftime') else v)
         db_tables[canonical_name] = df
 
-    # Ensure all 10 tables exist (fill missing with empty frames)
     for canonical_name in PBSV_SHEET_MAP.values():
         if canonical_name not in db_tables:
             db_tables[canonical_name] = pd.DataFrame()
@@ -75,127 +75,316 @@ def parse_multi_sheet_excel(file_bytes_or_path, filename=""):
     return db_tables
 
 
-def parse_excel_data(file_bytes_or_path, filename=""):
+# ────────────────────────────────────────────────────────────────────────────
+# Shared low-level helpers
+# ────────────────────────────────────────────────────────────────────────────
+
+def _safe_float(val):
+    """Best-effort numeric coercion. VN reports use ',' thousand separators."""
+    try:
+        val_str = str(val).replace(',', '').strip()
+        return float(val_str) if val_str not in ('', 'None') else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _cell(row, idx, default=''):
+    """Safe positional cell access that never raises IndexError."""
+    if idx is None or idx >= len(row):
+        return default
+    v = row[idx]
+    return default if v is None else v
+
+
+def _normalize_name(name):
+    """Uppercase + collapse whitespace, used to match the same person across files."""
+    return re.sub(r'\s+', ' ', (name or '').strip()).upper()
+
+
+def _slugify_name(name):
+    return re.sub(r'\s+', '_', (name or '').strip().upper())
+
+
+def _extract_date_from_text(text, label):
+    """Finds e.g. 'Đến ngày: 31/07/2026' anywhere in a blob of report text."""
+    m = re.search(re.escape(label) + r'\s*:?\s*([\d/]{6,10})', text)
+    return m.group(1) if m else None
+
+
+def _load_excel_rows(file_bytes_or_path):
+    """Loads a single-sheet .xls/.xlsx report (bytes or path) into a list-of-rows matrix."""
+    if isinstance(file_bytes_or_path, bytes):
+        if file_bytes_or_path.startswith(b'\xd0\xcf\x11\xe0'):
+            wb = xlrd.open_workbook(file_contents=file_bytes_or_path)
+            sheet = wb.sheet_by_index(0)
+            return [sheet.row_values(i) for i in range(sheet.nrows)]
+        wb = openpyxl.load_workbook(filename=io.BytesIO(file_bytes_or_path), data_only=True)
+        sheet = wb.active
+        return [[cell.value if cell.value is not None else '' for cell in row] for row in sheet.iter_rows()]
+
+    if str(file_bytes_or_path).lower().endswith('.xls'):
+        wb = xlrd.open_workbook(file_bytes_or_path)
+        sheet = wb.sheet_by_index(0)
+        return [sheet.row_values(i) for i in range(sheet.nrows)]
+    wb = openpyxl.load_workbook(file_bytes_or_path, data_only=True)
+    sheet = wb.active
+    return [[cell.value if cell.value is not None else '' for cell in row] for row in sheet.iter_rows()]
+
+
+def _header_text_blob(rows_data, n=10):
+    return " | ".join(str(c) for row in rows_data[:n] for c in row if c not in (None, ''))
+
+
+def _detect_excel_report_type(rows_data):
     """
-    Parses any XLS or XLSX transaction report dynamically.
-    Returns: company_name, list of transaction rows
+    Distinguishes the two known report layouts:
+      - 'order_history': "Lịch sử đặt lệnh" export (e.g. PBSV.xlsx) — one row per order,
+        has 'Tiểu khoản' + 'Mua/Bán' + 'Trạng thái' columns, needs Hoàn thành filter.
+      - 'trade_result':  "Kết quả khớp lệnh và phí giao dịch" style report — one row per
+        sub-account/symbol with separate Mua/Bán column groups (SHL, Môi giới, CTV...).
     """
+    for row in rows_data[:15]:
+        cells = [str(c).strip().lower() if c is not None else '' for c in row]
+        has_sub = any('tiểu khoản' in c for c in cells)
+        has_side = any('mua/bán' in c for c in cells)
+        has_status = any('trạng thái' in c for c in cells)
+        if has_sub and has_side and has_status:
+            return 'order_history'
+    return 'trade_result'
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Parser: "Kết quả khớp lệnh và phí giao dịch" style report
+# (e.g. "Bao cao giao dich *.xls" — one row per sub-account/symbol match)
+# ────────────────────────────────────────────────────────────────────────────
+
+def _parse_trade_result_rows(rows_data, filename=""):
     tx_rows = []
     company_name = "Công ty Chứng khoán"
-    
-    try:
-        if isinstance(file_bytes_or_path, bytes):
-            if file_bytes_or_path.startswith(b'\xd0\xcf\x11\xe0'):
-                wb = xlrd.open_workbook(file_contents=file_bytes_or_path)
-                sheet = wb.sheet_by_index(0)
-                rows_data = [sheet.row_values(i) for i in range(sheet.nrows)]
-            else:
-                wb = openpyxl.load_workbook(filename=io.BytesIO(file_bytes_or_path), data_only=True)
-                sheet = wb.active
-                rows_data = [[cell.value if cell.value is not None else '' for cell in row] for row in sheet.iter_rows()]
-        else:
-            if file_bytes_or_path.endswith('.xls'):
-                wb = xlrd.open_workbook(file_bytes_or_path)
-                sheet = wb.sheet_by_index(0)
-                rows_data = [sheet.row_values(i) for i in range(sheet.nrows)]
-            else:
-                wb = openpyxl.load_workbook(file_bytes_or_path, data_only=True)
-                sheet = wb.active
-                rows_data = [[cell.value if cell.value is not None else '' for cell in row] for row in sheet.iter_rows()]
 
-        for r in rows_data[:6]:
-            for cell in r:
-                cell_str = str(cell).strip()
-                if "Công ty" in cell_str or "Chứng khoán" in cell_str:
-                    company_name = cell_str
-                    break
-
-        header_row_idx = -1
-        col_indices = {}
-        
-        for idx, r in enumerate(rows_data[:20]):
-            r_str = [str(c).strip().lower() for c in r]
-            if any("stt" in c or "shl" in c or "mã chứng khoán" in c or "mã ck" in c for c in r_str):
-                header_row_idx = idx
-                for c_idx, c_val in enumerate(r_str):
-                    if "stt" in c_val: col_indices['stt'] = c_idx
-                    elif "shl" in c_val or "số hiệu" in c_val: col_indices['shl'] = c_idx
-                    elif "tiểu khoản" in c_val or "tài khoản" in c_val or "số tk" in c_val: col_indices['sub_acc'] = c_idx
-                    elif "tên khách hàng" in c_val or "tên kh" in c_val: col_indices['cust_name'] = c_idx
-                    elif "mã chứng khoán" in c_val or "mã ck" in c_val: col_indices['symbol'] = c_idx
-                    elif "môi giới" in c_val or "br" in c_val: col_indices['broker'] = c_idx
-                    elif "ctv" in c_val: col_indices['ctv'] = c_idx
-                    elif "ngày" in c_val: col_indices['tx_date'] = c_idx
+    for r in rows_data[:6]:
+        for cell in r:
+            cell_str = str(cell).strip()
+            if "Công ty" in cell_str or "Chứng khoán" in cell_str:
+                company_name = cell_str
                 break
 
-        if header_row_idx == -1:
-            header_row_idx = 9
+    header_text = _header_text_blob(rows_data)
+    report_date = (_extract_date_from_text(header_text, 'Đến ngày')
+                   or _extract_date_from_text(header_text, 'Từ ngày')
+                   or '')
 
-        for i in range(header_row_idx + 1, len(rows_data)):
-            r = rows_data[i]
-            if not any(r): continue
-            
-            cell0 = str(r[0]).strip() if len(r) > 0 else ""
-            if cell0.endswith('.0'): cell0 = cell0[:-2]
-            
-            if "tổng" in cell0.lower() or "sum" in cell0.lower():
-                continue
-                
-            shl_val = str(r[col_indices.get('shl', 1)]).split('.')[0] if len(r) > 1 else ""
-            if not shl_val or len(shl_val) < 3:
-                continue
+    header_row_idx = -1
+    col_indices = {}
 
-            sub_acc = str(r[col_indices.get('sub_acc', 2)]).strip() if len(r) > 2 else ""
-            cust_name = str(r[col_indices.get('cust_name', 3)]).strip() if len(r) > 3 else ""
-            symbol = str(r[col_indices.get('symbol', 4)]).strip() if len(r) > 4 else ""
-            
-            def safe_float(val):
-                try:
-                    val_str = str(val).replace(',', '').strip()
-                    return float(val_str) if val_str != '' else 0.0
-                except:
-                    return 0.0
+    for idx, r in enumerate(rows_data[:20]):
+        r_str = [str(c).strip().lower() for c in r]
+        if any("stt" in c or "shl" in c or "mã chứng khoán" in c or "mã ck" in c for c in r_str):
+            header_row_idx = idx
+            for c_idx, c_val in enumerate(r_str):
+                if "stt" in c_val: col_indices['stt'] = c_idx
+                elif "shl" in c_val or "số hiệu" in c_val: col_indices['shl'] = c_idx
+                elif "tiểu khoản" in c_val or "tài khoản" in c_val or "số tk" in c_val: col_indices['sub_acc'] = c_idx
+                elif "tên khách hàng" in c_val or "tên kh" in c_val: col_indices['cust_name'] = c_idx
+                elif "mã chứng khoán" in c_val or "mã ck" in c_val: col_indices['symbol'] = c_idx
+                elif "môi giới" in c_val or "br" in c_val: col_indices['broker'] = c_idx
+                elif "ctv" in c_val: col_indices['ctv'] = c_idx
+                elif "ngày" in c_val: col_indices['tx_date'] = c_idx
+            break
 
-            buy_qty_matched = safe_float(r[6]) if len(r) > 6 else 0.0
-            buy_price_avg = safe_float(r[7]) if len(r) > 7 else 0.0
-            buy_val = safe_float(r[8]) if len(r) > 8 else 0.0
-            
-            sell_qty_matched = safe_float(r[10]) if len(r) > 10 else 0.0
-            sell_price_avg = safe_float(r[11]) if len(r) > 11 else 0.0
-            sell_val = safe_float(r[12]) if len(r) > 12 else 0.0
-            
-            fee_val = safe_float(r[14]) if len(r) > 14 else 0.0
-            tax_val = safe_float(r[16]) if len(r) > 16 else 0.0
-            
-            broker = str(r[col_indices.get('broker', 19)]).strip() if len(r) > 19 else ""
-            ctv = str(r[col_indices.get('ctv', 20)]).strip() if len(r) > 20 else ""
-            tx_date = str(r[col_indices.get('tx_date', 21)]).strip() if len(r) > 21 else ""
+    if header_row_idx == -1:
+        header_row_idx = 9
 
-            tx_rows.append({
-                'source': 'Excel (' + (filename or 'Uploaded') + ')',
-                'company': company_name,
-                'company_code': 'EXCEL_CO',
-                'shl': shl_val,
-                'sub_acc': sub_acc or 'TK_DEFAULT',
-                'cust_name': cust_name or 'Khách hàng',
-                'symbol': symbol or 'VNINDEX',
-                'buy_qty_matched': buy_qty_matched,
-                'buy_price_avg': buy_price_avg,
-                'buy_val': buy_val,
-                'sell_qty_matched': sell_qty_matched,
-                'sell_price_avg': sell_price_avg,
-                'sell_val': sell_val,
-                'fee_val': fee_val,
-                'tax_val': tax_val,
-                'broker': broker,
-                'ctv': ctv,
-                'tx_date': tx_date or '04/08/2026'
-            })
+    for i in range(header_row_idx + 1, len(rows_data)):
+        r = rows_data[i]
+        if not any(r):
+            continue
+
+        cell0 = str(r[0]).strip() if len(r) > 0 else ""
+        if cell0.endswith('.0'):
+            cell0 = cell0[:-2]
+
+        if "tổng" in cell0.lower() or "sum" in cell0.lower():
+            continue
+
+        shl_val = str(_cell(r, col_indices.get('shl', 1))).split('.')[0]
+        if not shl_val or len(shl_val) < 3:
+            continue
+
+        sub_acc = str(_cell(r, col_indices.get('sub_acc', 2))).strip()
+        cust_name = str(_cell(r, col_indices.get('cust_name', 3))).strip()
+        symbol = str(_cell(r, col_indices.get('symbol', 4))).strip()
+
+        buy_qty_matched = _safe_float(_cell(r, 6))
+        buy_price_avg = _safe_float(_cell(r, 7))
+        buy_val = _safe_float(_cell(r, 8))
+
+        sell_qty_matched = _safe_float(_cell(r, 10))
+        sell_price_avg = _safe_float(_cell(r, 11))
+        sell_val = _safe_float(_cell(r, 12))
+
+        fee_val = _safe_float(_cell(r, 14))
+        tax_val = _safe_float(_cell(r, 16))
+
+        broker = str(_cell(r, col_indices.get('broker', 19))).strip()
+        ctv = str(_cell(r, col_indices.get('ctv', 20))).strip()
+        tx_date = str(_cell(r, col_indices.get('tx_date', 21))).strip()
+
+        tx_rows.append({
+            'source': 'Excel (' + (filename or 'Uploaded') + ')',
+            'company': company_name,
+            'company_code': 'EXCEL_CO',
+            'shl': shl_val,
+            'sub_acc': sub_acc or 'TK_DEFAULT',
+            'cust_name': cust_name or 'Khách hàng',
+            'symbol': symbol or 'VNINDEX',
+            'buy_qty_matched': buy_qty_matched,
+            'buy_price_avg': buy_price_avg,
+            'buy_val': buy_val,
+            'sell_qty_matched': sell_qty_matched,
+            'sell_price_avg': sell_price_avg,
+            'sell_val': sell_val,
+            'fee_val': fee_val,
+            'tax_val': tax_val,
+            'broker': broker,
+            'ctv': ctv,
+            'tx_date': tx_date or report_date
+        })
+
+    return company_name, tx_rows
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Parser: "Lịch sử đặt lệnh" (order history) report — e.g. PBSV.xlsx
+# One row per order attempt; only rows with Trạng thái == 'Hoàn thành' are real,
+# settled transactions — 'Đã sửa' / 'Đã hủy' rows must be discarded.
+# ────────────────────────────────────────────────────────────────────────────
+
+def _parse_order_history_rows(rows_data, filename=""):
+    tx_rows = []
+    company_name = "Công ty Chứng khoán"
+
+    for r in rows_data[:6]:
+        for cell in r:
+            cell_str = str(cell).strip()
+            if "Công ty" in cell_str or "Chứng khoán" in cell_str:
+                company_name = cell_str
+                break
+
+    header_text = _header_text_blob(rows_data)
+    acc_match = re.search(r'Số tài khoản\s*:?\s*([A-Za-z0-9]+)', header_text)
+    account_number = acc_match.group(1).strip() if acc_match else None
+    report_date = (_extract_date_from_text(header_text, 'Đến ngày')
+                   or _extract_date_from_text(header_text, 'Từ ngày')
+                   or '')
+
+    header_idx = -1
+    col = {}
+    for idx, row in enumerate(rows_data[:15]):
+        cells = [str(c).strip().lower() if c is not None else '' for c in row]
+        if any('tiểu khoản' in c for c in cells) and any('mua/bán' in c for c in cells):
+            header_idx = idx
+            for c_idx, c_val in enumerate(cells):
+                if 'tiểu khoản' in c_val: col['sub'] = c_idx
+                elif c_val == 'ngày': col['date'] = c_idx
+                elif 'mua/bán' in c_val: col['side'] = c_idx
+                elif 'mã ck' in c_val or 'mã chứng khoán' in c_val: col['symbol'] = c_idx
+                elif 'thông tin giao dịch' in c_val: col['detail_start'] = c_idx
+                elif 'trạng thái' in c_val: col['status'] = c_idx
+                elif c_val == 'phí': col['fee'] = c_idx
+                elif 'thuế tncn (quyền)' in c_val: col['tax2'] = c_idx
+                elif 'thuế tncn' in c_val: col['tax'] = c_idx
+                elif 'số hiệu lệnh' in c_val: col['order_id'] = c_idx
+            break
+
+    if header_idx == -1:
+        return company_name, tx_rows
+
+    # The merged "Thông tin giao dịch chứng khoán" header has its real sub-columns
+    # (KL đặt / Giá đặt / KL khớp / Giá khớp / Giá trị khớp) on the NEXT row.
+    data_start = header_idx + 1
+    if 'detail_start' in col and header_idx + 1 < len(rows_data):
+        sub_cells = [str(c).strip().lower() if c is not None else '' for c in rows_data[header_idx + 1]]
+        base = col['detail_start']
+        for c_idx in range(base, min(base + 6, len(sub_cells))):
+            label = sub_cells[c_idx]
+            if 'kl khớp' in label: col['qty_matched'] = c_idx
+            elif 'giá khớp' in label: col['price_matched'] = c_idx
+            elif 'giá trị khớp' in label: col['val_matched'] = c_idx
+        data_start = header_idx + 2
+
+    for i in range(data_start, len(rows_data)):
+        row = rows_data[i]
+        if not any(row):
+            continue
+
+        status = str(_cell(row, col.get('status'))).strip()
+        if status != 'Hoàn thành':
+            continue  # chỉ lấy các giao dịch đã khớp hoàn tất, bỏ 'Đã sửa' / 'Đã hủy'
+
+        side = str(_cell(row, col.get('side', 3))).strip()
+        symbol = str(_cell(row, col.get('symbol', 4))).strip()
+        tieu_khoan = str(_cell(row, col.get('sub', 1))).strip()
+        tx_date = str(_cell(row, col.get('date', 2))).strip()
+        order_id = str(_cell(row, col.get('order_id', 19), f"OH{i}")).strip()
+
+        qty = _safe_float(_cell(row, col.get('qty_matched')))
+        price = _safe_float(_cell(row, col.get('price_matched')))
+        val = _safe_float(_cell(row, col.get('val_matched')))
+        fee = _safe_float(_cell(row, col.get('fee')))
+        tax = _safe_float(_cell(row, col.get('tax'))) + _safe_float(_cell(row, col.get('tax2')))
+
+        if val <= 0 and qty <= 0:
+            continue
+
+        sub_acc = f"{account_number}-{tieu_khoan}" if account_number else (tieu_khoan or 'TK_DEFAULT')
+        is_buy = 'mua' in side.lower()
+
+        tx_rows.append({
+            'source': 'Excel (' + (filename or 'Uploaded') + ')',
+            'company': company_name,
+            'company_code': 'EXCEL_CO',
+            'shl': order_id,
+            'sub_acc': sub_acc,
+            'cust_name': f"Khách hàng {account_number}" if account_number else 'Khách hàng',
+            'symbol': symbol or 'VNINDEX',
+            'buy_qty_matched': qty if is_buy else 0.0,
+            'buy_price_avg': price if is_buy else 0.0,
+            'buy_val': val if is_buy else 0.0,
+            'sell_qty_matched': qty if not is_buy else 0.0,
+            'sell_price_avg': price if not is_buy else 0.0,
+            'sell_val': val if not is_buy else 0.0,
+            'fee_val': fee,
+            'tax_val': tax,
+            'broker': '',
+            'ctv': '',
+            'tx_date': tx_date or report_date
+        })
+
+    return company_name, tx_rows
+
+
+def parse_excel_data(file_bytes_or_path, filename=""):
+    """
+    Parses an XLS/XLSX transaction report, auto-detecting which of the two known
+    report layouts it is ('trade_result' vs 'order_history') and routing to the
+    matching row extractor.
+    Returns: company_name, list of transaction rows
+    """
+    try:
+        rows_data = _load_excel_rows(file_bytes_or_path)
+        if not rows_data:
+            return "Công ty Chứng khoán", []
+
+        report_type = _detect_excel_report_type(rows_data)
+        if report_type == 'order_history':
+            return _parse_order_history_rows(rows_data, filename=filename)
+        return _parse_trade_result_rows(rows_data, filename=filename)
 
     except Exception as e:
         print(f"Error parsing Excel file {filename}: {e}")
-        
-    return company_name, tx_rows
+        return "Công ty Chứng khoán", []
+
 
 def parse_pdf_data(file_bytes_or_path, filename=""):
     """
@@ -206,12 +395,17 @@ def parse_pdf_data(file_bytes_or_path, filename=""):
         pdf_file = io.BytesIO(file_bytes_or_path)
     else:
         pdf_file = file_bytes_or_path
-        
+
     company_name = "Công ty Chứng khoán (PDF)"
     tx_rows = []
-    
+
     try:
         with pdfplumber.open(pdf_file) as pdf:
+            full_text = "\n".join(page.extract_text() or '' for page in pdf.pages)
+            report_date = (_extract_date_from_text(full_text, 'Đến ngày')
+                           or _extract_date_from_text(full_text, 'Từ ngày')
+                           or '')
+
             for page in pdf.pages:
                 text = page.extract_text()
                 if not text:
@@ -232,13 +426,13 @@ def parse_pdf_data(file_bytes_or_path, filename=""):
                         mgr = re.sub(r'^\d+\s*', '', mgr)
                         if mgr:
                             current_manager = mgr
-                    
+
                     m = re.search(r'([0-9A-Z]{6,15})\s+(.*?)\s+([A-Z0-9]{3,6})\s+([\d,.]+)\s+([\d,.]+)', line_str)
                     if m:
                         sub_acc, cust_name, symbol, buy_val_str, sell_val_str = m.groups()
                         buy_val = float(buy_val_str.replace(',', '').replace('.', ''))
                         sell_val = float(sell_val_str.replace(',', '').replace('.', ''))
-                        
+
                         tx_rows.append({
                             'source': 'PDF (' + (filename or 'Uploaded') + ')',
                             'company': company_name,
@@ -249,12 +443,14 @@ def parse_pdf_data(file_bytes_or_path, filename=""):
                             'buy_val': buy_val,
                             'sell_val': sell_val,
                             'manager': current_manager,
-                            'manager_role': current_role
+                            'manager_role': current_role,
+                            'tx_date': report_date,
                         })
     except Exception as e:
         print(f"Error parsing PDF file {filename}: {e}")
 
     return company_name, tx_rows
+
 
 def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
     """
@@ -274,16 +470,40 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
             c_code = "CTCK_" + str(co_id_counter)
             company_map[c_name] = {'ID': co_id_counter, 'Mã định danh công ty': c_code, 'Tên công ty': c_name}
             co_id_counter += 1
-            
+
     if not company_map:
         company_map['Công ty Chứng khoán Default'] = {'ID': 1, 'Mã định danh công ty': 'CTCK_01', 'Tên công ty': 'Công ty Chứng khoán Default'}
-        
+
     df_company = pd.DataFrame(list(company_map.values()))
+
+    # ── Resolve a stable manager code for every PDF row by matching the person's
+    #    name against managers already identified in the Excel report(s) — instead
+    #    of hard-coding one specific name, this generalizes to any overlapping person.
+    excel_name_to_code = {}
+    for r in excel_tx_list:
+        for field in ('broker', 'ctv'):
+            val = r.get(field, '')
+            if val and '-' in val:
+                code, name = val.split('-', 1)
+                excel_name_to_code[_normalize_name(name)] = code.strip()
+
+    pdf_generated_codes = {}
+    for r in pdf_tx_list:
+        mgr_name = r.get('manager', 'Người quản lý')
+        norm = _normalize_name(mgr_name)
+        if norm in excel_name_to_code:
+            r['manager_code'] = excel_name_to_code[norm]
+        elif norm in pdf_generated_codes:
+            r['manager_code'] = pdf_generated_codes[norm]
+        else:
+            code = "NQL_" + _slugify_name(mgr_name)
+            pdf_generated_codes[norm] = code
+            r['manager_code'] = code
 
     # 2. Nguoi_quan_ly
     managers_dict = {}
     mgr_id_counter = 1
-    
+
     for r in excel_tx_list:
         co_id = company_map.get(r.get('company'), {}).get('ID', 1)
         for field, role in [('broker', 'Môi giới'), ('ctv', 'CTV')]:
@@ -305,8 +525,8 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
 
     for r in pdf_tx_list:
         co_id = company_map.get(r.get('company'), {}).get('ID', 1)
-        mgr_name = r.get('manager', 'Lê Minh Hiếu')
-        code = "CTV0166" if "Lê Minh Hiếu" in mgr_name else ("NQL_" + re.sub(r'\s+', '_', mgr_name.upper()))
+        mgr_name = r.get('manager', 'Người quản lý')
+        code = r.get('manager_code') or ("NQL_" + _slugify_name(mgr_name))
         if code not in managers_dict:
             managers_dict[code] = {
                 'ID': mgr_id_counter,
@@ -378,13 +598,11 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
             mgr_code = 'NQL_DEF'
             if r.get('ctv'): mgr_code = r['ctv'].split('-')[0]
             elif r.get('broker'): mgr_code = r['broker'].split('-')[0]
-            elif r.get('manager'):
-                mgr_name = r['manager']
-                mgr_code = 'CTV0166' if "Lê Minh Hiếu" in mgr_name else ("NQL_" + re.sub(r'\s+', '_', mgr_name.upper()))
-            
+            elif r.get('manager_code'): mgr_code = r['manager_code']
+
             is_org = "CÔNG TY" in r.get('cust_name', '').upper() or "TNHH" in r.get('cust_name', '').upper()
             cust_type = 'LKH02' if is_org else 'LKH01'
-            
+
             customers_dict[sub_acc] = {
                 'Mã khách hàng': sub_acc,
                 'Tên khách hàng': r.get('cust_name', 'Khách hàng'),
@@ -401,7 +619,7 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
                 'Tình trạng hoạt động (1: có, 0: không)': 1,
                 'Tổng dư nợ': 0.0
             }
-            
+
     df_customer = pd.DataFrame(list(customers_dict.values()))
 
     # 5. Cổ phiếu
@@ -420,8 +638,8 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
 
     # 6. Giao dịch
     tx_list = []
-    
-    # Excel transactions
+
+    # Excel transactions (both "trade_result" and "order_history" rows share this shape)
     for r in excel_tx_list:
         mgr_code = 'NQL_DEF'
         if r.get('ctv'): mgr_code = r['ctv'].split('-')[0]
@@ -436,12 +654,12 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
                 'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 1,
                 'Mã CP': r['symbol'],
                 'Thuế bán': 0.0,
-                'Ngày giao dịch': r.get('tx_date', '04/08/2026'),
+                'Ngày giao dịch': r.get('tx_date') or '',
                 'Phí net': r.get('fee_val', 0.0),
                 'Khối lượng giao dịch': r.get('buy_qty_matched', 0.0),
                 'Giá giao dịch': r.get('buy_price_avg', 0.0)
             })
-            
+
         if r.get('sell_val', 0) > 0 or r.get('sell_qty_matched', 0) > 0:
             tx_list.append({
                 'Mã giao dịch': r['shl'],
@@ -451,7 +669,7 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
                 'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 2,
                 'Mã CP': r['symbol'],
                 'Thuế bán': r.get('tax_val', 0.0),
-                'Ngày giao dịch': r.get('tx_date', '04/08/2026'),
+                'Ngày giao dịch': r.get('tx_date') or '',
                 'Phí net': r.get('fee_val', 0.0),
                 'Khối lượng giao dịch': r.get('sell_qty_matched', 0.0),
                 'Giá giao dịch': r.get('sell_price_avg', 0.0)
@@ -460,11 +678,11 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
     # PDF transactions (generate sequential ID: sub_acc + symbol + index)
     pdf_seq = len(tx_list)  # Continue sequence after excel transactions
     for idx, r in enumerate(pdf_tx_list, start=1):
-        mgr_name = r.get('manager', 'Lê Minh Hiếu')
-        mgr_code = 'CTV0166' if "Lê Minh Hiếu" in mgr_name else ("NQL_" + re.sub(r'\s+', '_', mgr_name.upper()))
+        mgr_code = r.get('manager_code', 'NQL_DEF')
         sub_acc = r['sub_acc']
         symbol = r['symbol']
-        
+        tx_date = r.get('tx_date') or ''
+
         if r.get('buy_val', 0) > 0:
             pdf_seq += 1
             tx_list.append({
@@ -475,12 +693,12 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
                 'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 1,
                 'Mã CP': symbol,
                 'Thuế bán': 0.0,
-                'Ngày giao dịch': '31/07/2026',
+                'Ngày giao dịch': tx_date,
                 'Phí net': r['buy_val'] * 0.00075,
                 'Khối lượng giao dịch': 0.0,
                 'Giá giao dịch': 0.0
             })
-            
+
         if r.get('sell_val', 0) > 0:
             pdf_seq += 1
             tx_list.append({
@@ -491,7 +709,7 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
                 'Giao dịch Mua/Bán (1: Mua, 2: Bán)': 2,
                 'Mã CP': symbol,
                 'Thuế bán': r['sell_val'] * 0.001,
-                'Ngày giao dịch': '31/07/2026',
+                'Ngày giao dịch': tx_date,
                 'Phí net': r['sell_val'] * 0.00075,
                 'Khối lượng giao dịch': 0.0,
                 'Giá giao dịch': 0.0
@@ -506,12 +724,12 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
     # 7. Phí gia hạn & 8. Báo cáo thu lãi
     first_cust_id = df_customer.iloc[0]['Mã khách hàng'] if not df_customer.empty else 'TK_DEFAULT'
     df_phi_gia_han = pd.DataFrame([{
-        'ID': 1, 'Ngày': '04/08/2026', 'Mã khách hàng': first_cust_id,
+        'ID': 1, 'Ngày': '', 'Mã khách hàng': first_cust_id,
         'Phí gia hạn dự thu': 0.0, 'Phí gia hạn thực thu': 0.0, 'Lãi': 0.0
     }])
 
     df_bao_cao_thu_lai = pd.DataFrame([{
-        'ID': 1, 'Ngày thu lãi': '04/08/2026', 'Mã khách hàng': first_cust_id,
+        'ID': 1, 'Ngày thu lãi': '', 'Mã khách hàng': first_cust_id,
         'Lãi vay': 0.0, 'Lãi ứng trước': 0.0
     }])
 
@@ -527,6 +745,7 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
         'Phi_gia_han': df_phi_gia_han,
         'Bao_cao_thu_lai': df_bao_cao_thu_lai
     }
+
 
 def build_master_flat_table(db_tables):
     """
@@ -602,7 +821,6 @@ def build_master_flat_table(db_tables):
 
     # ── Merge Giao_dich ← Khach_hang ─────────────────────────────────
     if 'Mã khách hàng' in df_gd.columns and 'Mã khách hàng' in df_kh.columns:
-        # Drop duplicate lookup columns from KhachHang that came embedded in GiaoDich
         kh_cols_to_keep = [c for c in df_kh.columns
                            if c not in df_gd.columns or c == 'Mã khách hàng']
         master_df = pd.merge(df_gd, df_kh[kh_cols_to_keep], on='Mã khách hàng', how='left')
@@ -637,7 +855,6 @@ def build_master_flat_table(db_tables):
                              how='left', suffixes=('', '_cp'))
 
     # ── Drop internal helper / duplicate columns ──────────────────────
-    # Columns that are join artifacts or explicit duplicates
     always_drop = {
         '_mgr_fk', '_kh_mgr_fk',
         'Tên Cty CK', 'Tên công ty CK', 'MucLuc',
@@ -654,12 +871,9 @@ def build_master_flat_table(db_tables):
     drop_cols = [c for c in master_df.columns
                  if c.endswith(('_gd', '_kh', '_nql', '_co', '_cp')) or c in always_drop]
     master_df.drop(columns=drop_cols, errors='ignore', inplace=True)
-    # Drop pandas merge suffix variants (_x, _y)
     dup_cols = [c for c in master_df.columns if c.endswith('_x') or c.endswith('_y')]
     master_df.drop(columns=dup_cols, errors='ignore', inplace=True)
-    # Drop columns that are entirely null/empty (no value to show)
     master_df = master_df.loc[:, master_df.notna().any(axis=0)]
-
 
     # ── Preferred column order (only include columns that exist) ──────
     preferred = [
@@ -676,12 +890,11 @@ def build_master_flat_table(db_tables):
         'Tổng dư nợ',
         'Giá mở cửa ngày giao dịch gần nhất', 'Giá đóng cửa ngày giao dịch gần nhất',
     ]
-    # Only keep columns that exist and are not all-null
     final_cols = [c for c in preferred if c in master_df.columns
                   and master_df[c].notna().any()]
-    # Append any remaining columns not in preferred list
     extra = [c for c in master_df.columns if c not in final_cols]
     return master_df[final_cols + extra].reset_index(drop=True)
+
 
 def generate_sql_script(db_tables):
     """Generates SQL DDL and DML statements for PostgreSQL / Supabase."""
@@ -719,13 +932,3 @@ def generate_sql_script(db_tables):
         sql_lines.append("\n")
 
     return "\n".join(sql_lines)
-
-def is_multi_sheet_data_model(fbytes):
-    """
-    Kiểm tra file Excel (dạng bytes) có phải là file nhiều sheet (Multi-sheet) hay không.
-    """
-    try:
-        wb = openpyxl.load_workbook(io.BytesIO(fbytes), read_only=True)
-        return len(wb.sheetnames) > 1
-    except Exception:
-        return False

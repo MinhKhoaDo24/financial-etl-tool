@@ -59,6 +59,7 @@ st.markdown("""
 # ────────────────────────────────────────────
 DEFAULT_XLS_PATH = os.path.join(os.path.dirname(__file__), "Bao cao giao dich 04.08.26.xls")
 DEFAULT_PDF_PATH = os.path.join(os.path.dirname(__file__), "RE1002 T7 LMH.pdf")
+DEFAULT_PBSV_XLSX_PATH = os.path.join(os.path.dirname(__file__), "PBSV.xlsx")
 DEFAULT_IMG_PATH = os.path.join(os.path.dirname(__file__), "Data Model.jpg")
 
 # ────────────────────────────────────────────
@@ -71,7 +72,7 @@ uploaded_files = st.sidebar.file_uploader(
     "📤 Tải lên file báo cáo (.pdf, .xlsx, .xls):",
     type=["pdf", "xlsx", "xls"],
     accept_multiple_files=True,
-    help="Hỗ trợ: file giao dịch XLS/XLSX đơn lẻ, file PDF RE1002, hoặc file Data Model PBSV.xlsx nhiều sheet"
+    help="Hỗ trợ: file giao dịch XLS/XLSX (khớp lệnh hoặc lịch sử đặt lệnh), file PDF RE1002, hoặc file Data Model nhiều sheet"
 )
 
 use_default = st.sidebar.checkbox(
@@ -92,7 +93,7 @@ st.markdown("""
         <span class="badge">v2.0 – Editable</span>
     </div>
     <div class="header-subtitle">
-        Xử lý báo cáo giao dịch PDF / XLS, hoặc tải thẳng file Data Model nhiều sheet (PBSV.xlsx).
+        Xử lý báo cáo giao dịch PDF / XLS / XLSX (khớp lệnh hoặc lịch sử đặt lệnh — tự động lọc giao dịch <strong>Hoàn thành</strong>).
         Dữ liệu có thể <strong>chỉnh sửa trực tiếp</strong> trên bảng trước khi xuất CSV / XLSX / SQL.
     </div>
 </div>
@@ -138,6 +139,11 @@ elif use_default:
         _, txs = etl.parse_excel_data(DEFAULT_XLS_PATH, filename="Bao cao giao dich 04.08.26.xls")
         excel_tx_all.extend(txs)
         processed_file_names.append("Bao cao giao dich 04.08.26.xls")
+    if os.path.exists(DEFAULT_PBSV_XLSX_PATH):
+        # PBSV.xlsx = báo cáo "Lịch sử đặt lệnh" — parser tự lọc chỉ giữ giao dịch Hoàn thành
+        _, txs = etl.parse_excel_data(DEFAULT_PBSV_XLSX_PATH, filename="PBSV.xlsx")
+        excel_tx_all.extend(txs)
+        processed_file_names.append("PBSV.xlsx")
     if os.path.exists(DEFAULT_PDF_PATH):
         _, txs = etl.parse_pdf_data(DEFAULT_PDF_PATH, filename="RE1002 T7 LMH.pdf")
         pdf_tx_all.extend(txs)
