@@ -1,341 +1,346 @@
-import streamlit as st
-import pandas as pd
+# -*- coding: utf-8 -*-
+"""
+=====================================================================
+app.py - STREAMLIT TOOL: CHUẨN HÓA & GỘP BÁO CÁO GIAO DỊCH JB + PBSV
+=====================================================================
+File này đã được nâng cấp cấu trúc giao diện (Sidebar + Cards + Tabs)
+và chèn đầy đủ comment hướng dẫn chi tiết từng thành phần giao diện.
+"""
+
 import io
-import zipfile
-import os
-import etl_processor as etl
 
-# ────────────────────────────────────────────
-# Page Config
-# ────────────────────────────────────────────
+import pandas as pd
+import streamlit as st
+
+import merge_processor as mp
+
+# =====================================================================
+# CẤU TRÚC 1: CAU HINH TRANG & BỐ CỤC TỔNG THỂ (PAGE CONFIG)
+# =====================================================================
+# st.set_page_config phải là lệnh Streamlit đầu tiên trong file.
+# - page_title: Tiêu đề hiển thị trên Tab trình duyệt
+# - page_icon: Biểu tượng Favicon trên tab trình duyệt
+# - layout: "wide" (rộng toàn màn hình) hoặc "centered" (thu gọn ở giữa)
+# - initial_sidebar_state: "expanded" (mở sidebar) hoặc "collapsed" (thu gọn)
 st.set_page_config(
-    page_title="Financial Data ETL Tool",
-    page_icon="⚡",
+    page_title="Gộp Báo Cáo Giao Dịch JB + PBSV",
+    page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# ────────────────────────────────────────────
-# CSS
-# ────────────────────────────────────────────
-st.markdown("""
-<style>
-    .main { font-family: 'Inter', -apple-system, sans-serif; }
-    .header-box {
-        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        border: 1px solid #334155;
+# =====================================================================
+# CẤU TRÚC 2: CUSTOM CSS (LÀM ĐẸP GIAO DIỆN SÂU BẰNG CSS)
+# =====================================================================
+# Bạn có thể tự do thêm/sửa mã CSS bên dưới để tùy biến font chữ, shadow, màu card,...
+st.markdown(
+    """
+    <style>
+    /* 1. Đội kiểu dáng Banner Header chính */
+    .main-header {
+        background: linear-gradient(135deg, #0052D4 0%, #4364F7 50%, #6FB1FC 100%);
+        padding: 20px 24px;
         border-radius: 12px;
-        padding: 22px 26px;
+        color: white;
         margin-bottom: 20px;
-        box-shadow: 0 10px 25px -5px rgba(0,0,0,.3);
+        box-shadow: 0 4px 15px rgba(0, 82, 212, 0.15);
     }
-    .header-title { color:#f8fafc; font-size:24px; font-weight:700; margin:0 0 6px 0; }
-    .header-subtitle { color:#94a3b8; font-size:13px; margin:0; }
-    .metric-card {
-        background:#1e293b; border:1px solid #334155;
-        border-radius:10px; padding:14px; text-align:center;
+    .main-header h1 {
+        color: white !important;
+        margin: 0;
+        font-size: 1.8rem;
+        font-weight: 700;
     }
-    .metric-value { color:#38bdf8; font-size:20px; font-weight:700; }
-    .metric-label { color:#94a3b8; font-size:12px; margin-top:4px; }
-    .badge {
-        background:#2563eb; color:#fff;
-        padding:3px 9px; border-radius:999px;
-        font-size:11px; font-weight:600;
+    .main-header p {
+        color: #E0E7FF !important;
+        margin: 6px 0 0 0;
+        font-size: 0.95rem;
     }
-    .dl-box {
-        background:#1e293b; border:2px solid #2563eb;
-        border-radius:12px; padding:18px; margin-bottom:18px;
+    
+    /* 2. Đổi màu và kiểu dáng cho các thẻ Metric Thống kê */
+    [data-testid="stMetric"] {
+        background-color: var(--background-color);
+        padding: 14px 18px;
+        border-radius: 10px;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        box-shadow: 0 2px 5px rgba(0,0,0,0.02);
     }
-    .edit-hint {
-        background:#0f2d1f; border:1px solid #22c55e;
-        border-radius:8px; padding:10px 14px; color:#86efac;
-        font-size:13px; margin-bottom:12px;
+    [data-testid="stMetricValue"] {
+        font-size: 1.6rem !important;
+        font-weight: 700;
+        color: #0066CC !important;
     }
-</style>
-""", unsafe_allow_html=True)
-
-# ────────────────────────────────────────────
-# Paths
-# ────────────────────────────────────────────
-DEFAULT_XLS_PATH = os.path.join(os.path.dirname(__file__), "Bao cao giao dich 04.08.26.xls")
-DEFAULT_PDF_PATH = os.path.join(os.path.dirname(__file__), "RE1002 T7 LMH.pdf")
-DEFAULT_PBSV_XLSX_PATH = os.path.join(os.path.dirname(__file__), "PBSV.xlsx")
-DEFAULT_IMG_PATH = os.path.join(os.path.dirname(__file__), "DATA MODEL.png")
-
-# ────────────────────────────────────────────
-# Sidebar
-# ────────────────────────────────────────────
-st.sidebar.title("⚙️ Tải & Xử Lý Dữ Liệu")
-st.sidebar.markdown("---")
-
-uploaded_files = st.sidebar.file_uploader(
-    "📤 Tải lên file báo cáo (.pdf, .xlsx, .xls):",
-    type=["pdf", "xlsx", "xls"],
-    accept_multiple_files=True,
-    help="Hỗ trợ: file giao dịch XLS/XLSX (khớp lệnh hoặc lịch sử đặt lệnh), file PDF RE1002, hoặc file Data Model nhiều sheet"
+    
+    /* 3. Tùy chỉnh Nút bấm Primary (Xử lý) trong Sidebar */
+    .stButton > button[kind="primary"] {
+        border-radius: 8px;
+        font-weight: 600;
+        font-size: 1rem;
+        padding: 10px 16px;
+        box-shadow: 0 4px 12px rgba(0, 102, 204, 0.25);
+    }
+    </style>
+""",
+    unsafe_allow_html=True,
 )
 
-use_default = st.sidebar.checkbox(
-    "📁 Sử dụng file mẫu Demo",
-    value=not bool(uploaded_files)
-)
+# =====================================================================
+# CẤU TRÚC 3: THANH SIDEBAR BÊN TRÁI (BẢNG ĐIỀU KHIỂN & TẢI FILE)
+# =====================================================================
+# Sử dụng `with st.sidebar:` để đưa toàn bộ khu vực Cấu hình & Tải file 
+# sang thanh bên trái, giải phóng không gian màn hình chính cho Bảng Excel.
+with st.sidebar:
+    st.image("https://img.icons8.com/color/96/analytics.png", width=60)
+    st.title("⚙️ Bảng Điều Khiển")
+    st.caption("Tải lên các file báo cáo để bắt đầu xử lý gộp dữ liệu.")
 
-st.sidebar.markdown("---")
-st.sidebar.info("💡 **Tip chỉnh sửa:** Sau khi dữ liệu hiển thị trên bảng, bạn có thể **click vào bất kỳ ô nào** để sửa trước khi tải xuống.")
+    st.divider()
 
-# ────────────────────────────────────────────
-# Header
-# ────────────────────────────────────────────
-st.markdown("""
-<div class="header-box">
-    <div class="header-title">
-        ⚡ Financial Data ETL Tool
-        <span class="badge">v2.0 – Editable</span>
-    </div>
-    <div class="header-subtitle">
-        Xử lý báo cáo giao dịch PDF / XLS / XLSX (khớp lệnh hoặc lịch sử đặt lệnh — tự động lọc giao dịch <strong>Hoàn thành</strong>).
-        Dữ liệu có thể <strong>chỉnh sửa trực tiếp</strong> trên bảng trước khi xuất CSV / XLSX / SQL.
-    </div>
-</div>
-""", unsafe_allow_html=True)
+    # --- KHU VỰC UPLOAD FILE ---
+    st.subheader("1️⃣ File Đầu Vào")
 
-# ────────────────────────────────────────────
-# Detect file mode & build db_tables
-# ────────────────────────────────────────────
-excel_tx_all = []
-pdf_tx_all = []
-processed_file_names = []
-is_direct_model = False        # True when file is PBSV multi-sheet model
-
-db_tables_raw = {}             # from ETL or direct load
-
-if uploaded_files:
-    for f in uploaded_files:
-        fname = f.name
-        fbytes = f.getvalue()
-        processed_file_names.append(fname)
-
-        if fname.lower().endswith(('.xlsx', '.xls')):
-            if etl.is_multi_sheet_data_model(fbytes):
-                # ── PBSV multi-sheet direct load ──
-                is_direct_model = True
-                loaded = etl.parse_multi_sheet_excel(fbytes, filename=fname)
-                # Merge into db_tables_raw (overwrite per table)
-                for k, v in loaded.items():
-                    if k not in db_tables_raw or db_tables_raw[k].empty:
-                        db_tables_raw[k] = v
-                    else:
-                        db_tables_raw[k] = pd.concat([db_tables_raw[k], v], ignore_index=True)
-            else:
-                _, txs = etl.parse_excel_data(fbytes, filename=fname)
-                excel_tx_all.extend(txs)
-
-        elif fname.lower().endswith('.pdf'):
-            _, txs = etl.parse_pdf_data(fbytes, filename=fname)
-            pdf_tx_all.extend(txs)
-
-elif use_default:
-    if os.path.exists(DEFAULT_XLS_PATH):
-        _, txs = etl.parse_excel_data(DEFAULT_XLS_PATH, filename="Bao cao giao dich 04.08.26.xls")
-        excel_tx_all.extend(txs)
-        processed_file_names.append("Bao cao giao dich 04.08.26.xls")
-    if os.path.exists(DEFAULT_PBSV_XLSX_PATH):
-        # PBSV.xlsx = báo cáo "Lịch sử đặt lệnh" — parser tự lọc chỉ giữ giao dịch Hoàn thành
-        _, txs = etl.parse_excel_data(DEFAULT_PBSV_XLSX_PATH, filename="PBSV.xlsx")
-        excel_tx_all.extend(txs)
-        processed_file_names.append("PBSV.xlsx")
-    if os.path.exists(DEFAULT_PDF_PATH):
-        _, txs = etl.parse_pdf_data(DEFAULT_PDF_PATH, filename="RE1002 T7 LMH.pdf")
-        pdf_tx_all.extend(txs)
-        processed_file_names.append("RE1002 T7 LMH.pdf")
-
-if not is_direct_model and not excel_tx_all and not pdf_tx_all:
-    st.warning("⚠️ Vui lòng tải lên ít nhất 1 file (.pdf, .xlsx, .xls) hoặc tích chọn 'Sử dụng file mẫu Demo'.")
-    st.stop()
-
-# Build relational tables
-if is_direct_model and db_tables_raw:
-    db_tables = db_tables_raw
-else:
-    db_tables = etl.build_relational_database(excel_tx_all, pdf_tx_all)
-
-master_df = etl.build_master_flat_table(db_tables)
-
-# ────────────────────────────────────────────
-# Metrics bar
-# ────────────────────────────────────────────
-df_gd = db_tables.get('giao_dich', pd.DataFrame())
-total_tx  = len(df_gd)
-total_val = pd.to_numeric(df_gd.get('gia_tri_giao_dich', pd.Series(dtype=float)), errors='coerce').sum() if not df_gd.empty else 0
-total_cust  = len(db_tables.get('khach_hang', pd.DataFrame()))
-total_stock = len(db_tables.get('co_phieu', pd.DataFrame()))
-total_files = len(processed_file_names)
-
-cols = st.columns(5)
-for c, val, lbl in zip(cols,
-    [total_files, total_tx, f"{total_val:,.0f} đ", total_cust, total_stock],
-    ["File đã xử lý", "Tổng giao dịch", "Tổng giá trị", "Khách hàng", "Mã cổ phiếu"]):
-    c.markdown(f'<div class="metric-card"><div class="metric-value">{val}</div><div class="metric-label">{lbl}</div></div>', unsafe_allow_html=True)
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-if processed_file_names:
-    mode_tag = "📊 Multi-sheet Data Model" if is_direct_model else "🔄 ETL từ báo cáo"
-    st.success(f"✅ {mode_tag} — Đã xử lý: **{', '.join(processed_file_names)}**")
-
-# ────────────────────────────────────────────
-# SESSION STATE: store editable tables
-# ────────────────────────────────────────────
-# We store edited versions in session_state so edits persist across rerenders.
-if "edited_tables" not in st.session_state:
-    st.session_state.edited_tables = {}
-if "edited_master" not in st.session_state:
-    st.session_state.edited_master = None
-
-# Initialize session state on first load or when new data arrives
-file_key = ",".join(processed_file_names) + str(is_direct_model)
-if st.session_state.get("_last_file_key") != file_key:
-    st.session_state.edited_tables = {k: v.copy() for k, v in db_tables.items()}
-    st.session_state.edited_master = master_df.copy()
-    st.session_state["_last_file_key"] = file_key
-
-# ────────────────────────────────────────────
-# Download helpers — always use edited state
-# ────────────────────────────────────────────
-def get_master_csv():
-    return st.session_state.edited_master.to_csv(index=False).encode('utf-8-sig')
-
-def get_master_xlsx():
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-        st.session_state.edited_master.to_excel(writer, sheet_name="Master_Data_Model", index=False)
-        for tbl_name, df_tbl in st.session_state.edited_tables.items():
-            df_tbl.to_excel(writer, sheet_name=tbl_name[:31], index=False)
-    return buf.getvalue()
-
-def get_zip_csv():
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for tbl_name, df_tbl in st.session_state.edited_tables.items():
-            zf.writestr(f"{tbl_name}.csv", df_tbl.to_csv(index=False).encode('utf-8-sig'))
-    return buf.getvalue()
-
-def get_sql():
-    return etl.generate_sql_script(st.session_state.edited_tables).encode('utf-8')
-
-# Quick download bar
-st.markdown('<div class="dl-box"><b style="color:#38bdf8">📥 Tải Nhanh File Kết Quả</b> &nbsp;—&nbsp; <span style="color:#94a3b8;font-size:13px">Phản ánh mọi thay đổi bạn đã chỉnh sửa bên dưới</span></div>', unsafe_allow_html=True)
-
-dc1, dc2, dc3, dc4 = st.columns(4)
-with dc1:
-    st.download_button("📄 CSV Tổng Hợp", get_master_csv(), "Master_Data_Model.csv", "text/csv", use_container_width=True)
-with dc2:
-    st.download_button("📊 Excel Multi-Sheet", get_master_xlsx(), "Master_Data_Model.xlsx",
-                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-with dc3:
-    st.download_button("📦 ZIP CSVs", get_zip_csv(), "Database_CSVs.zip", "application/zip", use_container_width=True)
-with dc4:
-    st.download_button("📜 SQL Script", get_sql(), "supabase_schema_data.sql", "text/plain", use_container_width=True)
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-# ────────────────────────────────────────────
-# Tabs
-# ────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "✏️ 1. Chỉnh Sửa Bảng Master (Data Model)",
-    "✏️ 2. Chỉnh Sửa Từng Bảng Riêng (Theo Thực Thể)",
-    "🔍 3. Chi Tiết Trích Xuất Thô",
-    "📐 4. Sơ Đồ Data Model (ERD)",
-    "☁️ 5. Hướng Dẫn Deploy"
-])
-
-# ─── TAB 1: Master editable view ───
-with tab1:
-    st.subheader("✏️ Bảng Tổng Hợp Master — Click Vào Ô Để Chỉnh Sửa")
-    st.markdown('<div class="edit-hint">💡 Click vào bất kỳ ô nào trong bảng bên dưới để sửa giá trị. Thay đổi sẽ được phản ánh ngay vào file tải xuống.</div>', unsafe_allow_html=True)
-
-    edited_master = st.data_editor(
-        st.session_state.edited_master,
-        use_container_width=True,
-        num_rows="dynamic",      # Allow adding/deleting rows
-        key="master_editor"
-    )
-    # Persist edits to session_state
-    st.session_state.edited_master = edited_master
-
-    st.markdown(f"**{len(edited_master.columns)} cột** | **{len(edited_master)} dòng**")
-
-# ─── TAB 2: Individual entity editor ───
-with tab2:
-    st.subheader("✏️ Chỉnh Sửa Từng Bảng Dữ Liệu Theo Thực Thể")
-    st.markdown('<div class="edit-hint">💡 Chọn bảng từ dropdown, chỉnh sửa trực tiếp trên lưới, sau đó nhấn nút Lưu Thay Đổi để áp dụng.</div>', unsafe_allow_html=True)
-
-    available_tables = {k: v for k, v in st.session_state.edited_tables.items() if not v.empty}
-    selected_table = st.selectbox(
-        "Chọn bảng cần chỉnh sửa:",
-        list(available_tables.keys()),
-        index=min(8, len(available_tables)-1) if available_tables else 0
+    jb_files = st.file_uploader(
+        "📄 File JB input (.xlsx, .csv)",
+        type=["xlsx", "xls", "csv"],
+        key="jb_uploader",
+        accept_multiple_files=True,
+        help="Báo cáo 'Kết quả khớp lệnh và phí giao dịch' từ JB. Có thể chọn nhiều file.",
     )
 
-    if selected_table and selected_table in st.session_state.edited_tables:
-        edited_tbl = st.data_editor(
-            st.session_state.edited_tables[selected_table],
-            use_container_width=True,
-            num_rows="dynamic",
-            key=f"editor_{selected_table}"
+    pbsv_files = st.file_uploader(
+        "📄 File PBSV input (.xlsx, .csv)",
+        type=["xlsx", "xls", "csv"],
+        key="pbsv_uploader",
+        accept_multiple_files=True,
+        help="Báo cáo 'Lịch sử đặt lệnh' từ PBSV. Chỉ giữ giao dịch 'Hoàn thành'. Có thể chọn nhiều file.",
+    )
+
+    master_files = st.file_uploader(
+        "👥 DS Khách hàng (2 sheet JB & PB)",
+        type=["xlsx", "xls"],
+        key="master_uploader",
+        accept_multiple_files=True,
+        help="Cần có 2 sheet: 1 sheet chứa 'JB' và 1 sheet chứa 'PB'.",
+    )
+
+    st.divider()
+
+    # --- NÚT XỬ LÝ (PRIMARY BUTTON) ---
+    # Nút bấm được đặt dạng use_container_width=True để full chiều rộng sidebar
+    process_clicked = st.button("🚀 Bắt đầu Xử lý", type="primary", use_container_width=True)
+
+    # --- TRỢ GIÚP / HƯỚNG DẪN Ở SIDEBAR ---
+    with st.expander("❓ Hướng dẫn sử dụng"):
+        st.markdown(
+            """
+        1. Tải lên **DS Khách hàng** và ít nhất **1 file giao dịch** (JB hoặc PBSV).
+        2. Nhấn nút **🚀 Bắt đầu Xử lý**.
+        3. Xem thống kê và chỉnh sửa dữ liệu trực tiếp ở màn hình chính.
+        4. Chuyển sang Tab **Tải xuống** để tải file Excel/CSV.
+        """
         )
 
-        save_col, dl_col = st.columns([1, 2])
-        with save_col:
-            if st.button("💾 Lưu thay đổi bảng này", type="primary", use_container_width=True):
-                st.session_state.edited_tables[selected_table] = edited_tbl
-                # Rebuild master from updated tables
-                st.session_state.edited_master = etl.build_master_flat_table(st.session_state.edited_tables)
-                st.success(f"✅ Đã lưu thay đổi cho bảng `{selected_table}`!")
+# =====================================================================
+# CẤU TRÚC 4: MÀN HÌNH CHÍNH (MAIN CONTENT AREA)
+# =====================================================================
 
-        with dl_col:
+# --- 4.1. BANNER TIÊU ĐỀ CHÍNH ---
+st.markdown(
+    """
+    <div class="main-header">
+        <h1>📊 Hệ Thống Chuẩn Hóa & Gộp Báo Cáo Giao Dịch</h1>
+        <p>Tự động đối soát, khớp danh sách khách hàng và xuất báo cáo chuẩn JB + PBSV</p>
+    </div>
+""",
+    unsafe_allow_html=True,
+)
+
+# --- 4.2. QUẢN LÝ TRẠNG THÁI (SESSION STATE) ---
+# Session state giúp giữ nguyên kết quả xử lý ngay cả khi người dùng tương tác với bảng
+if "result" not in st.session_state:
+    st.session_state.result = None
+if "edited_output" not in st.session_state:
+    st.session_state.edited_output = None
+if "edited_mismatch" not in st.session_state:
+    st.session_state.edited_mismatch = None
+
+# --- 4.3. XỬ LÝ SỰ KIỆN KHI BẤM NÚT "XỬ LÝ" ---
+if process_clicked:
+    if not master_files:
+        st.warning("⚠️ Vui lòng tải lên file Danh sách khách hàng (Master) ở thanh Sidebar trước khi bấm Xử lý.")
+    elif not (jb_files or pbsv_files):
+        st.warning("⚠️ Vui lòng tải lên ít nhất 1 file giao dịch đầu vào (JB hoặc PBSV) ở thanh Sidebar.")
+    else:
+        with st.spinner("⏳ Đang chuẩn hóa dữ liệu và xử lý gộp file..."):
+            result = mp.process_files(
+                [(f, f.name) for f in jb_files] if jb_files else [],
+                [(f, f.name) for f in pbsv_files] if pbsv_files else [],
+                [(f, f.name) for f in master_files] if master_files else [],
+            )
+        st.session_state.result = result
+        st.session_state.edited_output = (
+            result["output_df"].copy() if result["output_df"] is not None else None
+        )
+        st.session_state.edited_mismatch = result["mismatch_df"].copy()
+
+# --- 4.4. HIỂN THỊ KHI CHƯA CÓ DỮ LIỆU ---
+result = st.session_state.result
+
+if result is None:
+    # Sử dụng st.container với border=True để tạo Thẻ thông báo chào mừng
+    with st.container(border=True):
+        st.info("👈 Hãy chọn các file đầu vào từ **Thanh Sidebar bên trái** và bấm **🚀 Bắt đầu Xử lý**.")
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            st.markdown("##### 📁 File JB Input")
+            st.caption("Báo cáo khớp lệnh & phí từ hệ thống JB.")
+        with col_b:
+            st.markdown("##### 📁 File PBSV Input")
+            st.caption("Lịch sử đặt lệnh đã hoàn thành từ PBSV.")
+        with col_c:
+            st.markdown("##### 👥 Danh sách Khách hàng")
+            st.caption("File Excel gồm 2 sheet khách hàng JB và PB.")
+    st.stop()
+
+# --- 4.5. XỬ LÝ BÁO LỖI VÀ CẢNH BÁO ---
+if result["errors"]:
+    st.error("❌ **Lỗi cấu trúc file nghiêm trọng:**")
+    for err in result["errors"]:
+        st.markdown(f"- {err}")
+    st.stop()
+
+if result.get("file_errors"):
+    st.error(f"❌ Có **{len(result['file_errors'])} file bị lỗi định dạng** (các file hợp lệ khác vẫn được xử lý):")
+    for err in result["file_errors"]:
+        st.markdown(f"- {err}")
+
+if result["warnings"]:
+    with st.expander(f"⚠️ {len(result['warnings'])} cảnh báo chi tiết trong quá trình gộp dữ liệu", expanded=False):
+        for w in result["warnings"]:
+            st.markdown(f"- {w}")
+
+# --- HÀM HỖ TRỢ CHUYỂN ĐỔI DỮ LIỆU ĐÃ CHỈNH SỬA RA BYTES ĐỂ TẢI DOWN ---
+def _to_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
+def _to_xlsx_bytes(df: pd.DataFrame, mismatch_df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Output", index=False)
+        if len(mismatch_df) > 0:
+            mismatch_df.to_excel(writer, sheet_name="Khong_khop", index=False)
+    return buf.getvalue()
+
+
+# =====================================================================
+# CẤU TRÚC 5: KHU VỰC THỐNG KÊ DASHBOARD (METRICS CARD CONTAINER)
+# =====================================================================
+# Gom các số liệu KPI vào một Card container có khung viền bo góc đẹp mắt
+with st.container(border=True):
+    st.markdown("#### 📈 Thống Kê Tổng Quan Dữ Liệu")
+    stats = result["stats"]
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Giao dịch JB", f"{stats.get('so_gd_jb', 0):,} dòng")
+    s2.metric("GD PBSV (Hoàn thành)", f"{stats.get('so_gd_pbsv', 0):,} dòng")
+    s3.metric("Tổng dòng Output", f"{stats.get('tong_so_gd', 0):,} dòng")
+    s4.metric("Khách chưa khớp", f"{stats.get('so_dong_khong_khop', 0):,} dòng", delta_color="inverse")
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# =====================================================================
+# CẤU TRÚC 6: PHÂN CHIA TAB CÔNG VIỆC (MULTI-TAB WORKFLOW)
+# =====================================================================
+# Chia giao diện hiển thị kết quả thành 3 Tab chuyên biệt
+tab_main, tab_mismatch, tab_export = st.tabs(
+    [
+        "📋 Bảng Kết Quả Chính",
+        "⚠️ Dòng Không Khớp Khách Hàng",
+        "📥 Tải Xuất Báo Cáo",
+    ]
+)
+
+# --- TAB 1: BẢNG DỮ LIỆU CHÍNH (DẠNG EXCEL EDITABLE) ---
+with tab_main:
+    st.subheader("2️⃣ Xem & Chỉnh Sửa Báo Cáo Dữ Liệu")
+    st.caption("💡 Bạn có thể click đúp chuột vào bất kỳ ô nào để chỉnh sửa trực tiếp dữ liệu trước khi tải xuống.")
+
+    # st.data_editor cho phép sửa dữ liệu dạng Excel
+    edited_output = st.data_editor(
+        st.session_state.edited_output,
+        use_container_width=True,
+        num_rows="dynamic",
+        key="output_editor",
+    )
+    st.session_state.edited_output = edited_output
+
+    st.success("✅ **Đã cập nhật:** File tải về bên dưới luôn là **dữ liệu mới nhất sau khi bạn sửa tay**.")
+
+    # Khung chứa 2 nút tải nhanh trực tiếp tại Tab 1
+    with st.container(border=True):
+        col_down1, col_down2 = st.columns(2)
+        with col_down1:
             st.download_button(
-                label=f"⬇️ Tải CSV bảng `{selected_table}`",
-                data=edited_tbl.to_csv(index=False).encode('utf-8-sig'),
-                file_name=f"{selected_table}.csv",
+                "⬇️ Tải xuống file CSV (.csv)",
+                data=_to_csv_bytes(st.session_state.edited_output),
+                file_name="output_giao_dich_da_sua.csv",
                 mime="text/csv",
-                use_container_width=True
+                use_container_width=True,
+                key="btn_dl_csv_tab1",
+            )
+        with col_down2:
+            st.download_button(
+                "⬇️ Tải xuống file Excel (.xlsx)",
+                data=_to_xlsx_bytes(st.session_state.edited_output, st.session_state.edited_mismatch),
+                file_name="output_giao_dich_da_sua.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="btn_dl_xlsx_tab1",
             )
 
-# ─── TAB 3: Raw extracted data ───
-with tab3:
-    st.subheader("🔍 Dữ Liệu Thô Trích Xuất")
-    if excel_tx_all:
-        st.markdown("#### 📄 Dữ liệu từ File Excel")
-        st.dataframe(pd.DataFrame(excel_tx_all), use_container_width=True)
-    if pdf_tx_all:
-        st.markdown("#### 📑 Dữ liệu từ File PDF")
-        st.dataframe(pd.DataFrame(pdf_tx_all), use_container_width=True)
-    if is_direct_model:
-        st.info("📊 File này là Data Model nhiều sheet — không qua bước ETL trung gian. Dữ liệu gốc được hiển thị trực tiếp ở Tab 2.")
+# --- TAB 2: CÁC DÒNG LỖI / KHÔNG KHỚP KHÁCH HÀNG ---
+with tab_mismatch:
+    if len(st.session_state.edited_mismatch) > 0:
+        st.subheader("⚠️ Danh Sách Giao Dịch Không Khớp Khách Hàng")
+        st.caption("Các dòng này chưa tìm thấy thông tin khách hàng tương ứng trong file Master. Bạn có thể bổ sung thủ công tại đây.")
 
-# ─── TAB 4: ERD ───
-with tab4:
-    st.subheader("📐 Sơ đồ Schema Relational Data Model")
-    if os.path.exists(DEFAULT_IMG_PATH):
-        try:
-            st.image(DEFAULT_IMG_PATH, caption="Relational Database Model Schema (DATA MODEL.png)", use_container_width=True)
-        except Exception:
-            st.image(DEFAULT_IMG_PATH, caption="Relational Database Model Schema (DATA MODEL.png)")
+        edited_mismatch = st.data_editor(
+            st.session_state.edited_mismatch,
+            use_container_width=True,
+            num_rows="dynamic",
+            key="mismatch_editor",
+        )
+        st.session_state.edited_mismatch = edited_mismatch
     else:
-        st.info("Sơ đồ DATA MODEL.png (chỉ hiển thị khi chạy tại local).")
+        st.success("🎉 **Tuyệt vời!** Tất cả các giao dịch đều đã khớp hoàn toàn với danh sách khách hàng.")
 
-# ─── TAB 5: Deploy guide ───
-with tab5:
-    st.subheader("☁️ Hướng Dẫn Deploy Streamlit Web Tool Công Khai")
-    st.markdown("""
-    1. Upload các file (`app.py`, `etl_processor.py`, `requirements.txt`, `DATA MODEL.png`) lên **GitHub**.
-    2. Đăng nhập [share.streamlit.io](https://share.streamlit.io) bằng tài khoản GitHub.
-    3. Chọn **New app** → chọn repository → nhập `app.py` → bấm **Deploy!**
-    
-    Sau 1-2 phút bạn sẽ có link công khai chia sẻ cho mọi người dùng trực tuyến!
-    """)
+# --- TAB 3: TẢI FILE KẾT QUẢ (EXPORT OPTIONS) ---
+with tab_export:
+    st.subheader("3️⃣ Tải Xuất File Báo Cáo Dữ Liệu")
+    st.caption("Chọn định dạng file bạn mong muốn để tải về máy tính (bao gồm tất cả chỉnh sửa tay mới nhất).")
 
-st.markdown("---")
-st.caption("⚡ Financial Data ETL Tool v2.0 | Streamlit Web Engine.")
+    # Đặt nút tải file trong khung Card viền đẹp mắt
+    with st.container(border=True):
+        col_d1, col_d2 = st.columns(2)
+
+        with col_d1:
+            st.markdown("##### 📄 Định dạng CSV (.csv)")
+            st.caption("Dữ liệu bảng chính (sau khi chỉnh sửa) dạng CSV UTF-8.")
+            st.download_button(
+                "⬇️ Tải File CSV",
+                data=_to_csv_bytes(st.session_state.edited_output),
+                file_name="output_giao_dich.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        with col_d2:
+            st.markdown("##### 📊 Định dạng Excel (.xlsx)")
+            st.caption("Bao gồm cả Sheet Output chính và Sheet Các dòng không khớp.")
+            st.download_button(
+                "⬇️ Tải File Excel (.xlsx)",
+                data=_to_xlsx_bytes(st.session_state.edited_output, st.session_state.edited_mismatch),
+                file_name="output_giao_dich.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
