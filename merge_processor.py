@@ -70,8 +70,84 @@ class ValidationError(Exception):
 
 
 # ------------------------------------------------------------------
-# Helpers dung chung
+# Helpers dung chung & Tu khoa nhan dien Cong ty / To chuc
 # ------------------------------------------------------------------
+
+COMPANY_KEYWORDS_SUBSTRING = [
+    "CÔNG TY", "TỔNG CÔNG TY", "TẬP ĐOÀN", "DOANH NGHIỆP", "CHI NHÁNH",
+    "TRUNG TÂM", "HIỆP HỘI", "NGÂN HÀNG", "BẢO HIỂM", "CHỨNG KHOÁN",
+    "QUỸ ĐẦU TƯ", "QUỸ MỞ", "QUỸ THÀNH VIÊN", "QUỸ HỘI", "QUỸ", "TỔ CHỨC",
+    "HỢP TÁC XÃ", "BAN QUẢN LÝ", "SỞ GIAO DỊCH", "VIỆN NGHỊÊN CỨU", "VIỆN",
+    "LIÊN DOANH", "THƯƠNG MẠI CỔ PHẦN", "THƯƠNG MẠI DỊCH VỤ", "CỔ PHẦN",
+    "DOANH NGHIỆP TƯ NHÂN", "HOLDING", "HOLDINGS", "CORPORATION", "SECURITIES",
+    "INVESTMENT", "INVESTMENTS", "MANAGEMENT", "CAPITAL", "PARTNERS",
+    "LIMITED", "FINANCE", "FINANCIAL", "ENTERPRISE", "ASSET MANAGEMENT",
+    "ASSET", "COMMERCIAL", "LOGISTICS", "REAL ESTATE", "TECHNOLOGY",
+    "DEVELOPMENT", "SERVICES", "TRADING", "SOLUTIONS",
+]
+
+COMPANY_KEYWORDS_TOKEN = {
+    "CTY", "TCTY", "CTCP", "TNHH", "TMCP", "NHTMCP", "NHTM", "JSC", "DNTN",
+    "TCT", "HTX", "CN", "LLC", "PLC", "INC", "LTD", "CO", "CO.", "CORP",
+    "GROUP", "BANK", "FUND", "FUNDS", "TRUST", "BV", "NV", "SA", "AG",
+    "GMBH", "PTE", "SDN", "BHD", "SRO"
+}
+
+ROMAN_NUMERALS = {"I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"}
+
+
+def is_company_or_organization(name: str) -> bool:
+    """Kiem tra xem ten khach hang co phai la cong ty, to chuc, doanh nghiep hay khong."""
+    if not name or not isinstance(name, str):
+        return False
+    upper_name = name.strip().upper()
+    if not upper_name:
+        return False
+
+    # Kiem tra cac chuoi con (substring)
+    for kw in COMPANY_KEYWORDS_SUBSTRING:
+        if kw in upper_name:
+            return True
+
+    # Kiem tra cac token / tu doc lap
+    tokens = set(re.split(r'[\s,.\-/()]+', upper_name))
+    for tk in COMPANY_KEYWORDS_TOKEN:
+        if tk in tokens:
+            return True
+
+    return False
+
+
+def format_customer_name(name: str) -> str:
+    """Chuan hoa ten khach hang:
+    Neu ten bi full IN HOA va KHONG PHAI cong ty, to chuc -> chuyen ve Title Case (Nguyễn Văn A).
+    Neu la cong ty/to chuc hoac da co hoa thuong -> giu nguyen.
+    """
+    if not name or not isinstance(name, str):
+        return name if name is not None else ""
+
+    s = name.strip()
+    if not s:
+        return s
+
+    # Chi dinh dang lai ten FULL IN HOA (s.isupper() == True)
+    if s.isupper():
+        if not is_company_or_organization(s):
+            formatted = s.title()
+
+            # Giu nguyen cac ma La Ma (I, II, III, IV, ...)
+            words = formatted.split()
+            new_words = []
+            for w in words:
+                clean_w = re.sub(r'[^\w]', '', w).upper()
+                if clean_w in ROMAN_NUMERALS:
+                    new_words.append(w.upper())
+                else:
+                    new_words.append(w)
+            return " ".join(new_words)
+
+    return s
+
 
 def _norm_text(v) -> str:
     """Chuan hoa 1 gia tri o (cell) ve chuoi da strip, phuc vu so sanh/tim header."""
@@ -369,7 +445,7 @@ def parse_jb_input(file, filename: str) -> tuple[pd.DataFrame, list[str]]:
             "ngay": ngay,
             "so_hieu_lenh": shl or None,
             "so_tieu_khoan": so_tieu_khoan,
-            "ten_khach_hang_raw": _norm_text(get(row, "ten_khach_hang")) or None,
+            "ten_khach_hang_raw": format_customer_name(_norm_text(get(row, "ten_khach_hang"))) or None,
             "ma_ck": _norm_text(get(row, "ma_ck")) or None,
             "loai_gd": side,
             "kl_dat": kl_dat,
@@ -571,6 +647,10 @@ def parse_customer_master(file, filename: str) -> tuple[pd.DataFrame, pd.DataFra
                 f"{', '.join(missing)}. Các cột tìm thấy: {', '.join(df.columns)}."
             )
         df = df.copy()
+        if "TÊN KHÁCH HÀNG" in df.columns:
+            df["TÊN KHÁCH HÀNG"] = df["TÊN KHÁCH HÀNG"].apply(
+                lambda v: format_customer_name(str(v)) if pd.notna(v) and str(v).strip() else v
+            )
         df["_key"] = df["SỐ TIỂU KHOẢN"].apply(_key_str)
         df = df[df["_key"].notna()]
         dup = df["_key"].duplicated()
@@ -606,17 +686,22 @@ def _join_source(df_norm: pd.DataFrame, master: pd.DataFrame, source: str) -> tu
         m = master.loc[key] if (key is not None and key in master.index) else None
         matched = m is not None
 
+        raw_cust = row.get("ten_khach_hang_raw")
+        raw_cust_fmt = format_customer_name(raw_cust) if raw_cust else ""
+
         if not matched:
             mismatch_rows.append({
                 "Nguồn": source,
                 "Số tiểu khoản tra cứu": key if key else "(rỗng)",
-                "Tên khách hàng (nếu có)": row.get("ten_khach_hang_raw") or "",
+                "Tên khách hàng (nếu có)": raw_cust_fmt,
                 "Lý do": "Không tìm thấy trong danh sách khách hàng"
                 if key else "Thiếu số tiểu khoản để đối chiếu (kiểm tra 'Số tài khoản' ở đầu báo cáo PBSV)",
             })
 
         tai_khoan_luu_ky = m["TÀI KHOẢN LƯU KÝ"] if matched else UNMATCHED_LABEL
-        ten_khach_hang = row.get("ten_khach_hang_raw") or (m["TÊN KHÁCH HÀNG"] if matched else UNMATCHED_LABEL)
+        master_cust = m["TÊN KHÁCH HÀNG"] if matched else UNMATCHED_LABEL
+        master_cust_fmt = format_customer_name(master_cust) if (matched and pd.notna(master_cust)) else UNMATCHED_LABEL
+        ten_khach_hang = raw_cust_fmt or master_cust_fmt
 
         if source == "JB":
             # Theo yeu cau: JB dung ten CTV lam "Nguoi quan ly". Uu tien gia tri co san

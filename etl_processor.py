@@ -5,6 +5,9 @@ import openpyxl
 import pdfplumber
 import pandas as pd
 
+from merge_processor import format_customer_name, is_company_or_organization
+
+
 # Mapping between sheet names in PBSV-style multi-sheet Excel → canonical table names
 PBSV_SHEET_MAP = {
     'CoPhieu':          'co_phieu',
@@ -647,12 +650,12 @@ def build_relational_database(excel_tx_list=None, pdf_tx_list=None):
             elif r.get('broker'): mgr_code = r['broker'].split('-')[0]
             elif r.get('manager_code'): mgr_code = r['manager_code']
 
-            is_org = "CÔNG TY" in r.get('cust_name', '').upper() or "TNHH" in r.get('cust_name', '').upper()
+            is_org = is_company_or_organization(r.get('cust_name', ''))
             cust_type = 'LKH02' if is_org else 'LKH01'
 
             customers_dict[parent_acc] = {
                 'so_tai_khoan': parent_acc,
-                'ten_khach_hang': r.get('cust_name', 'Khách hàng'),
+                'ten_khach_hang': format_customer_name(r.get('cust_name', 'Khách hàng')),
                 'ma_cong_ty_chung_khoan': co_id,
                 'ma_loai_khach_hang': cust_type,
                 'ma_nhom_khach_hang': 'NKH01',

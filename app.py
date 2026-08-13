@@ -152,7 +152,7 @@ st.markdown(
     """
     <div class="main-header">
         <h1>📊 Hệ Thống Chuẩn Hóa & Gộp Báo Cáo Giao Dịch</h1>
-        <p>Tự động đối soát, khớp danh sách khách hàng và xuất báo cáo chuẩn JB + PBSV</p>
+        <p>Tự động đối soát, đồng bộ định dạng tên khách hàng (Title Case & giữ tên Công ty), gộp báo cáo chuẩn JB + PBSV</p>
     </div>
 """,
     unsafe_allow_html=True,
