@@ -8,9 +8,12 @@ và chèn đầy đủ comment hướng dẫn chi tiết từng thành phần gi
 """
 
 import io
+import json
 
 import pandas as pd
+import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 import merge_processor as mp
 
@@ -233,6 +236,132 @@ def _to_xlsx_bytes(df: pd.DataFrame, mismatch_df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
+def _to_tsv_string(df: pd.DataFrame, use_vn_decimal: bool = True, include_header: bool = False) -> str:
+    """Chuyển đổi DataFrame thành chuỗi Tab-Separated Values (TSV) để dán chuẩn vào Google Sheets bản tiếng Việt.
+    Dùng dấu phẩy ',' cho phần thập phân (vd: 0,75) để không bị Google Sheets hiểu nhầm dấu '.' là phân cách nghìn và nhảy thành 75.
+    Mặc định include_header=False để loại bỏ dòng tiêu đề khi copy.
+    """
+    df_clean = df.copy()
+    num_cols = ["Khối lượng đặt", "Khối lượng khớp", "Giá khớp", "Tổng giá ", "% Phí", "Phí", "Thuế", "Tổng thuần"]
+    for col in num_cols:
+        if col in df_clean.columns:
+            s_num = pd.to_numeric(df_clean[col], errors="coerce").fillna(0.0)
+
+            def _format_num(x):
+                if pd.isna(x):
+                    return ""
+                fx = float(x)
+                if fx.is_integer():
+                    return str(int(fx))
+                formatted = f"{fx:.4f}".rstrip("0").rstrip(".")
+                if use_vn_decimal:
+                    formatted = formatted.replace(".", ",")
+                return formatted
+
+            df_clean[col] = s_num.apply(_format_num)
+
+    return df_clean.to_csv(sep="\t", index=False, header=include_header)
+
+
+def copy_to_clipboard_button(text_data: str, label: str = "📋 Copy Dữ Liệu Cho Google Sheets", key: str = "copy_btn"):
+    """Tạo nút JavaScript copy dữ liệu thẳng vào Clipboard trình duyệt."""
+    js_data = json.dumps(text_data)
+    html_code = f"""
+    <div style="font-family: system-ui, -apple-system, sans-serif;">
+        <button id="{key}" onclick="copyData_{key}()" style="
+            width: 100%;
+            background: linear-gradient(135deg, #107c41 0%, #1f9a55 100%);
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            border-radius: 8px;
+            cursor: pointer;
+            box-shadow: 0 3px 8px rgba(16, 124, 65, 0.25);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: all 0.2s ease;
+        ">
+            {label}
+        </button>
+        <div id="status_{key}" style="margin-top: 6px; font-size: 12px; color: #107c41; font-weight: 600; text-align: center; display: none;">
+            ✅ Đã copy dữ liệu! Mở Google Sheets và bấm Ctrl + V để dán.
+        </div>
+    </div>
+    <script>
+    function copyData_{key}() {{
+        const text = {js_data};
+        navigator.clipboard.writeText(text).then(function() {{
+            const status = document.getElementById("status_{key}");
+            const btn = document.getElementById("{key}");
+            const oldBg = btn.style.background;
+            const oldText = btn.innerHTML;
+            btn.style.background = "#198754";
+            btn.innerHTML = "✅ Đã Copy!";
+            status.style.display = "block";
+            setTimeout(function() {{
+                btn.style.background = oldBg;
+                btn.innerHTML = oldText;
+                status.style.display = "none";
+            }}, 3500);
+        }}).catch(function(err) {{
+            alert("Lỗi sao chép dữ liệu: " + err);
+        }});
+    }}
+    </script>
+    """
+    components.html(html_code, height=70)
+
+
+def push_to_google_sheet_webhook(df: pd.DataFrame, webhook_url: str) -> tuple[bool, str]:
+    """Gửi dữ liệu DataFrame qua Webhook Google Apps Script để tự động cập nhật Google Sheet dưới dạng KIỂU SỐ (Numbers)."""
+    try:
+        import numpy as np
+        headers = df.columns.tolist()
+
+        def _clean_val(v):
+            if pd.isna(v) or v is None:
+                return ""
+            if isinstance(v, (int, float, np.integer, np.floating)):
+                if np.isnan(v) or np.isinf(v):
+                    return 0
+                if float(v).is_integer():
+                    return int(v)
+                return float(v)
+            s = str(v).strip()
+            if "," in s and "." not in s:
+                try:
+                    return float(s.replace(",", "."))
+                except ValueError:
+                    pass
+            try:
+                val = float(s)
+                if val.is_integer():
+                    return int(val)
+                return val
+            except ValueError:
+                return s
+
+        rows = [[_clean_val(cell) for cell in row] for row in df.values]
+        payload = {
+            "headers": headers,
+            "rows": rows
+        }
+        response = requests.post(webhook_url, json=payload, timeout=30)
+        if response.status_code == 200:
+            return True, "🎉 Tự động đẩy dữ liệu sang Google Sheet thành công!"
+        else:
+            return False, f"⚠️ Lỗi phản hồi từ Google Apps Script (HTTP {response.status_code}): {response.text}"
+    except Exception as e:
+        return False, f"❌ Lỗi kết nối Webhook: {str(e)}"
+
+
+
+
+
 # =====================================================================
 # CẤU TRÚC 5: KHU VỰC THỐNG KÊ DASHBOARD (METRICS CARD CONTAINER)
 # =====================================================================
@@ -251,12 +380,13 @@ st.markdown("<br>", unsafe_allow_html=True)
 # =====================================================================
 # CẤU TRÚC 6: PHÂN CHIA TAB CÔNG VIỆC (MULTI-TAB WORKFLOW)
 # =====================================================================
-# Chia giao diện hiển thị kết quả thành 3 Tab chuyên biệt
-tab_main, tab_mismatch, tab_export = st.tabs(
+# Chia giao diện hiển thị kết quả thành 4 Tab chuyên biệt
+tab_main, tab_mismatch, tab_export, tab_gsheet = st.tabs(
     [
         "📋 Bảng Kết Quả Chính",
         "⚠️ Dòng Không Khớp Khách Hàng",
         "📥 Tải Xuất Báo Cáo",
+        "🟢 Đồng Bộ Google Sheets",
     ]
 )
 
@@ -274,11 +404,11 @@ with tab_main:
     )
     st.session_state.edited_output = edited_output
 
-    st.success("✅ **Đã cập nhật:** File tải về bên dưới luôn là **dữ liệu mới nhất sau khi bạn sửa tay**.")
+    st.success("✅ **Đã cập nhật:** File tải về / copy bên dưới luôn là **dữ liệu mới nhất sau khi bạn sửa tay**.")
 
-    # Khung chứa 2 nút tải nhanh trực tiếp tại Tab 1
+    # Khung chứa nút tải nhanh và nút copy trực tiếp tại Tab 1
     with st.container(border=True):
-        col_down1, col_down2 = st.columns(2)
+        col_down1, col_down2, col_down3 = st.columns(3)
         with col_down1:
             st.download_button(
                 "⬇️ Tải xuống file CSV (.csv)",
@@ -296,6 +426,12 @@ with tab_main:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key="btn_dl_xlsx_tab1",
+            )
+        with col_down3:
+            copy_to_clipboard_button(
+                _to_tsv_string(st.session_state.edited_output),
+                label="📋 Copy Dán Vào Google Sheets",
+                key="btn_copy_tab1",
             )
 
 # --- TAB 2: CÁC DÒNG LỖI / KHÔNG KHỚP KHÁCH HÀNG ---
@@ -344,3 +480,98 @@ with tab_export:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
+
+# --- TAB 4: ĐỒNG BỘ GOOGLE SHEETS & COPY NHANH ---
+with tab_gsheet:
+    st.subheader("🟢 Đồng Bộ Dữ Liệu Trực Tiếp Sang Google Sheets")
+    st.caption("Sao chép dữ liệu để dán nhanh hoặc tự động ghi trực tiếp vào Google Sheet mà không cần tải file về máy.")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        with st.container(border=True):
+            st.markdown("##### 📋 Phương án 1: Copy Nhanh 1-Click")
+            st.caption("Copy dữ liệu (đã bỏ dòng tiêu đề/header) dưới dạng bảng TSV. Mở Google Sheet và nhấn **Ctrl + V** tại ô muốn dán.")
+            copy_to_clipboard_button(
+                _to_tsv_string(st.session_state.edited_output),
+                label="📋 Copy Dữ Liệu Dán Vào Google Sheets",
+                key="btn_copy_tab_gsheet",
+            )
+
+    with c2:
+        with st.container(border=True):
+            st.markdown("##### 🚀 Phương án 2: Tự Động Đẩy Sang Google Sheet")
+            st.caption("Nhập URL Webhook (Apps Script) của Google Sheet để tự động ghi đè dữ liệu.")
+            webhook_url = st.text_input(
+                "🔗 URL Google Apps Script Webhook",
+                placeholder="https://script.google.com/macros/s/.../exec",
+                key="gsheet_webhook_url_input",
+            )
+            if st.button("🚀 Bắt đầu Đẩy Dữ Liệu sang Google Sheet", type="primary", use_container_width=True):
+                if not webhook_url:
+                    st.warning("⚠️ Vui lòng nhập Webhook URL của Google Apps Script trước!")
+                else:
+                    with st.spinner("⏳ Đang kết nối và đẩy dữ liệu sang Google Sheet..."):
+                        success, msg = push_to_google_sheet_webhook(st.session_state.edited_output, webhook_url)
+                    if success:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.expander("📖 Hướng dẫn thiết lập Tự động Đẩy Dữ liệu sang Google Sheet (1 phút)"):
+        st.markdown(
+            """
+            **Bước 1:** Mở file Google Sheet của bạn -> Trên thanh menu chọn **Extensions (Tiện ích mở rộng)** -> **Apps Script**.
+            
+            **Bước 2:** Xóa hết code cũ, dán đoạn mã bên dưới vào và nhấn biểu tượng **Lưu (Save 💾)**:
+            """
+        )
+        st.code(
+            """function doPost(e) {
+  try {
+    var data = JSON.parse(e.postData.contents);
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    
+    // Xóa nội dung cũ
+    sheet.clearContents();
+    
+    // Ghi tiêu đề
+    if (data.headers && data.headers.length > 0) {
+      sheet.appendRow(data.headers);
+    }
+    
+    // Ghi các dòng dữ liệu (tự động ép kiểu chuỗi số thành Number chuẩn)
+    if (data.rows && data.rows.length > 0) {
+      var cleanedRows = data.rows.map(function(row) {
+        return row.map(function(val) {
+          if (typeof val === 'string') {
+            var trimmed = val.trim();
+            if (trimmed !== '' && !isNaN(trimmed)) {
+              return Number(trimmed);
+            }
+          }
+          return val;
+        });
+      });
+      sheet.getRange(2, 1, cleanedRows.length, cleanedRows[0].length).setValues(cleanedRows);
+    }
+    
+    return ContentService.createTextOutput("Success").setMimeType(ContentService.MimeType.TEXT);
+  } catch (err) {
+    return ContentService.createTextOutput("Error: " + err.toString()).setMimeType(ContentService.MimeType.TEXT);
+  }
+}""",
+            language="javascript",
+        )
+
+        st.markdown(
+            """
+            **Bước 3:** Nhấn nút **Deploy (Triển khai)** góc trên bên phải -> Chọn **New deployment (Triển khai mới)**.
+            - Select type (Chọn loại): **Web app**.
+            - Execute as: **Me**.
+            - Who has access (Ai có quyền truy cập): **Anyone (Bất kỳ ai)**.
+            - Nhấn **Deploy** -> Cấp quyền nếu Google hỏi -> Copy đường link **Web App URL** dán vào ô bên trên.
+            """
+        )
+

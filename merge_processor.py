@@ -92,17 +92,53 @@ def _key_str(v) -> Optional[str]:
 
 
 def _to_number(v) -> float:
-    """Chuyen ve so, tra 0.0 neu rong/khong hop le (dung cho cac truong tinh toan)."""
+    """Chuyen ve so (float), tra 0.0 neu rong/khong hop le (ho tro dinh dang chuoi Viet Nam & Quoc te)."""
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return 0.0
-    if isinstance(v, str):
-        v = v.replace(",", "").strip()
-        if v == "":
-            return 0.0
-    try:
+    if isinstance(v, (int, float)):
         return float(v)
+
+    s = str(v).strip()
+    if not s or s == "-":
+        return 0.0
+
+    # Chuan hoa phan phan cach nghin va phap phan
+    if "." in s and "," in s:
+        # Neu dot o truoc comma (vd: "36.800,50" hoac "3.009.000,00"): VN format
+        if s.rfind(".") < s.rfind(","):
+            s = s.replace(".", "").replace(",", ".")
+        else: # EN format: "36,800.50"
+            s = s.replace(",", "")
+    elif "." in s:
+        # Truong hop chi co dau cham:
+        # Vd 1: "36.800.000" -> nhieu dau cham -> phan cach nghin VN
+        # Vd 2: "36.800" hoac "9.200" -> phan sau co 3 chu so ngàn -> phan cach nghin VN
+        # Vd 3: "1000000.0" hoac "0.15" -> standard decimal float -> giu nguyen
+        parts = s.split(".")
+        if len(parts) > 2:
+            s = s.replace(".", "")
+        elif len(parts) == 2:
+            if len(parts[1]) == 3 and not parts[1].startswith("00") and parts[0] != "0":
+                s = s.replace(".", "")
+    elif "," in s:
+        # Truong hop chi co dau phay:
+        # Vd 1: "0,1" hoac "36,8" -> "0.1", "36.8" (decimal comma VN)
+        # Vd 2: "1,000,000" -> (multiple commas -> thousand separator EN)
+        parts = s.split(",")
+        if len(parts) > 2:
+            s = s.replace(",", "")
+        elif len(parts) == 2:
+            if len(parts[1]) == 3:
+                s = s.replace(",", "")
+            else:
+                s = s.replace(",", ".")
+
+    try:
+        val = float(s)
+        return val if not np.isnan(val) else 0.0
     except (ValueError, TypeError):
-        return np.nan
+        return 0.0
+
 
 
 def _read_raw_table(file, filename: str) -> pd.DataFrame:
@@ -630,29 +666,39 @@ def _fill_derived_fields(df: pd.DataFrame) -> pd.DataFrame:
         Tong thuan (Ban) = Tong gia - Phi - Thue
         Tong thuan (Mua) = Tong gia + Phi + Thue
         % Phi = Phi / Tong gia * 100
-    Cac dong da co san gia tri (JB) duoc giu nguyen.
+    Chuan hoa tat ca cot so thanh kieu du lieu so (float64) thay vi chuoi.
     """
     df = df.copy()
-    tong_gia = pd.to_numeric(df["Tổng giá "], errors="coerce")
-    phi = pd.to_numeric(df["Phí"], errors="coerce").fillna(0)
-    thue = pd.to_numeric(df["Thuế"], errors="coerce").fillna(0)
-    tong_thuan = pd.to_numeric(df["Tổng thuần"], errors="coerce")
-    pct_phi = pd.to_numeric(df["% Phí"], errors="coerce")
+
+    # Ep tat ca cac cot so thanh kieu so (numeric)
+    num_cols = ["Khối lượng đặt", "Khối lượng khớp", "Giá khớp", "Tổng giá ", "% Phí", "Phí", "Thuế", "Tổng thuần"]
+    for col in num_cols:
+        if col in df.columns:
+            if df[col].dtype == object:
+                df[col] = df[col].apply(_to_number)
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    tong_gia = df["Tổng giá "]
+    phi = df["Phí"]
+    thue = df["Thuế"]
+    tong_thuan = df["Tổng thuần"]
+    pct_phi = df["% Phí"]
 
     is_ban = df["Giao dịch (Mua/Bán)"] == "Bán"
     is_mua = df["Giao dịch (Mua/Bán)"] == "Mua"
 
-    need_tt = tong_thuan.isna()
+    need_tt = (tong_thuan == 0.0) | (tong_thuan.isna())
     tong_thuan = tong_thuan.where(~(need_tt & is_ban), tong_gia - phi - thue)
     tong_thuan = tong_thuan.where(~(need_tt & is_mua), tong_gia + phi + thue)
 
-    need_pf = pct_phi.isna()
+    need_pf = (pct_phi == 0.0) | (pct_phi.isna())
     safe_div = tong_gia.replace(0, np.nan)
     pct_phi = pct_phi.where(~need_pf, (phi / safe_div * 100))
 
     df["Tổng thuần"] = tong_thuan
     df["% Phí"] = pct_phi.round(4)
     return df
+
 
 
 def build_output(
