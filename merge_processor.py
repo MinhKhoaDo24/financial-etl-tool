@@ -11,7 +11,9 @@ Quy trinh:
     2. Doc va chuan hoa PBSV input   -> parse_pbsv_input() (chi giu "Hoan thanh")
     3. Doc danh sach khach hang JB/PB (2 sheet) -> parse_customer_master()
     4. Join theo khoa + dien truong thieu -> join_and_normalize()
-    5. Tinh cac truong dan xuat (Tong thuan, % Phi neu con thieu)
+    5. Tinh cac truong dan xuat ("Tổng thuần", % Phí neu con thieu)
+       theo CONG THUC CHUAN DUY NHAT: sau = truoc + Phi + Thue (ap dung cho moi dong,
+       khong phan biet nguon JB/PBSV hay Mua/Ban) -> _fill_derived_fields()
     6. Gop JB + PBSV -> build_output()
 """
 from __future__ import annotations
@@ -24,11 +26,21 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+# ============================================================
+# Ten 2 cot gia tri giao dich (truoc/sau phi + thue) - dung dung ten cot nhu trong file
+# mau Output.xlsx do user cung cap (nguon chuan duy nhat cho schema output).
+# CONG THUC CHUAN DUY NHAT (ap dung cho MOI dong, khong phan biet nguon JB/PBSV
+# hay Mua/Ban):
+#     COL_SAU = COL_TRUOC + Phí + Thuế
+# Xem _fill_derived_fields() de biet chi tiet + buoc validate.
+# ============================================================
+COL_TRUOC = "Tổng giá "
+COL_SAU = "Tổng thuần"
 
 # ============================================================
 # Cau truc output chuan (khop file mau Output.xlsx do user cung cap)
-# Luu y: 2 ten cot co dau cach cuoi ("Tai khoan luu ky ", "Tong gia ")
-# la co chu y de khop chinh xac template - khong duoc strip().
+# Luu y: cot "Tai khoan luu ky " co dau cach cuoi la co chu y de khop chinh xac
+# template - khong duoc strip().
 # ============================================================
 OUTPUT_COLUMNS = [
     "Ngày",
@@ -41,11 +53,11 @@ OUTPUT_COLUMNS = [
     "Khối lượng đặt",
     "Khối lượng khớp",
     "Giá khớp",
-    "Tổng giá ",
+    COL_TRUOC,
     "% Phí",
     "Phí",
     "Thuế",
-    "Tổng thuần",
+    COL_SAU,
     "Tên người quản lý",
     "Tên Công ty",
 ]
@@ -57,17 +69,13 @@ MISMATCH_COLUMNS = [
     "Lý do",
 ]
 
-UNMATCHED_LABEL = "Không xác định"
-
 COMPANY_NAME_FALLBACK = {
     "JB": "JB",
     "PBSV": "PBSV",
 }
 
-
 class ValidationError(Exception):
     """Loi format / thieu cot bat buoc o file dau vao - hien thi ro cho user, khong crash app."""
-
 
 # ------------------------------------------------------------------
 # Helpers dung chung & Tu khoa nhan dien Cong ty / To chuc
@@ -215,6 +223,15 @@ def _to_number(v) -> float:
     except (ValueError, TypeError):
         return 0.0
 
+
+def _format_date_cell(v) -> Optional[str]:
+    """Chuan hoa 1 o ngay thang ve chuoi 'dd/mm/yyyy', ho tro ca cell dang datetime
+    (Excel luu ngay dang so/date-time) lan cell dang chuoi co san."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    if isinstance(v, (datetime, pd.Timestamp)):
+        return v.strftime("%d/%m/%Y")
+    return _norm_text(v) or None
 
 
 def _read_raw_table(file, filename: str) -> pd.DataFrame:
@@ -495,10 +512,49 @@ _PBSV_REQUIRED_INTERNAL = [
 
 _TRANG_THAI_HOAN_THANH = "hoàn thành"
 
+# ------------------------------------------------------------------
+# Dinh dang PBSV MOI: bao cao "Ket qua khop lenh cua khach hang".
+# Khac voi dinh dang cu (2 cot, marker "Tieu khoan"):
+#   - Header chi 1 dong (khong phai 2 dong ghep).
+#   - Khong co cot "Trang thai" vi moi dong da la giao dich khop lenh hoan tat
+#     (khong can loc "Hoan thanh").
+#   - Cot "So tai khoan" tren moi dong da la khoa tieu khoan day du (vd
+#     "029C000256.00"), khong can ghep voi "So tai khoan: xxx" o dau file.
+#   - Xen giua cac dong du lieu la cac dong tong phu ("Tong theo ma CK: ...",
+#     "Tong theo ngay:...") va cuoi file la cac dong tong ket - phai BO QUA
+#     (khong duoc dung vong lap) vi du lieu con tiep tuc sau cac dong nay.
+# ------------------------------------------------------------------
+_PBSV_MATCH_COL_MAP = {
+    "STT": "stt",
+    "Ngày đặt lệnh": "ngay",
+    "Mã CK": "ma_ck",
+    "Loại lệnh": "mua_ban",
+    "Số hiệu lệnh": "so_hieu_lenh",
+    "Số tài khoản": "so_tieu_khoan",
+    "SL đặt": "kl_dat",
+    "SL khớp": "kl_khop",
+    "Giá khớp BQ": "gia_khop",
+    "Giá trị khớp": "gia_tri_khop",
+    "%\nPhí": "pct_phi",
+    "Giá trị phí": "phi_gia_tri",
+    "Thuế TNCN": "thue_tncn",
+    "Thuế quyền": "thue_quyen",
+    "Phí CK": "phi_ck",
+    "Thành tiền": "thanh_tien",
+}
+
+_PBSV_MATCH_REQUIRED_INTERNAL = [
+    "stt", "ngay", "ma_ck", "mua_ban", "so_hieu_lenh", "so_tieu_khoan",
+    "kl_dat", "kl_khop", "gia_khop", "gia_tri_khop", "phi_gia_tri", "thue_tncn",
+]
+
 
 def parse_pbsv_input(file, filename: str) -> tuple[pd.DataFrame, list[str]]:
-    """Doc + chuan hoa file PBSV input (bao cao 'Lich su dat lenh').
-    Chi giu lai giao dich co Trang thai = 'Hoan thanh' (quy tac 1).
+    """Doc + chuan hoa file PBSV input. Tu dong nhan dien 1 trong 2 dinh dang:
+      - Dinh dang cu 'Lich su dat lenh' (header 2 dong, marker 'Tieu khoan', co cot
+        Trang thai -> chi giu 'Hoan thanh').
+      - Dinh dang moi 'Ket qua khop lenh cua khach hang' (header 1 dong, marker
+        'STT' + 'So tai khoan', khong co cot Trang thai).
     """
     warnings: list[str] = []
     raw = _read_raw_table(file, filename)
@@ -507,10 +563,7 @@ def parse_pbsv_input(file, filename: str) -> tuple[pd.DataFrame, list[str]]:
 
     header_row = _find_row_with_marker(raw, ["Tiểu khoản"])
     if header_row is None:
-        raise ValidationError(
-            f"File PBSV input '{filename}' sai định dạng: không tìm thấy dòng tiêu đề chứa cột 'Tiểu khoản'. "
-            "Vui lòng kiểm tra đây có đúng là báo cáo 'Lịch sử đặt lệnh' của PBSV không."
-        )
+        return _parse_pbsv_match_result(raw, filename, warnings)
     sub_header_row = header_row + 1
     if sub_header_row >= len(raw):
         raise ValidationError(f"File PBSV input '{filename}' sai định dạng: thiếu dòng tiêu đề phụ.")
@@ -596,6 +649,92 @@ def parse_pbsv_input(file, filename: str) -> tuple[pd.DataFrame, list[str]]:
     return pd.DataFrame(records), warnings
 
 
+def _parse_pbsv_match_result(raw: pd.DataFrame, filename: str, warnings: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    """Doc dinh dang PBSV MOI: bao cao 'Ket qua khop lenh cua khach hang' (xem ghi chu o
+    _PBSV_MATCH_COL_MAP). Header chi 1 dong; khong loc Trang thai vi moi dong da la giao
+    dich khop lenh hoan tat; cac dong "Tong theo ma CK" / "Tong theo ngay" / tong ket cuoi
+    file duoc bo qua bang continue (khong break) vi du lieu con tiep tuc sau do.
+    """
+    header_row = _find_row_with_marker(raw, ["STT"])
+    header_texts = {_norm_text(v) for v in raw.iloc[header_row]} if header_row is not None else set()
+    if header_row is None or "Số tài khoản" not in header_texts:
+        raise ValidationError(
+            f"File PBSV input '{filename}' sai định dạng: không tìm thấy dòng tiêu đề chứa cột 'Tiểu khoản' "
+            "(định dạng 'Lịch sử đặt lệnh') hoặc 2 cột 'STT' + 'Số tài khoản' (định dạng 'Kết quả khớp lệnh "
+            "của khách hàng'). Vui lòng kiểm tra lại file báo cáo PBSV."
+        )
+
+    header = raw.iloc[header_row].tolist()
+    col_index = {}
+    for idx, cell in enumerate(header):
+        internal = _PBSV_MATCH_COL_MAP.get(_norm_text(cell))
+        if internal and internal not in col_index:
+            col_index[internal] = idx
+
+    missing = [k for k in _PBSV_MATCH_REQUIRED_INTERNAL if k not in col_index]
+    if missing:
+        raise ValidationError(
+            f"File PBSV input '{filename}' (định dạng 'Kết quả khớp lệnh') thiếu các cột bắt buộc: "
+            f"{', '.join(missing)}. Các cột tìm thấy: {', '.join(sorted(col_index.keys())) or '(không có)'}."
+        )
+
+    company_name = _extract_company_name(raw, "PBSV")
+
+    def get(row, key):
+        i = col_index.get(key)
+        return row[i] if i is not None else None
+
+    records = []
+    r = header_row + 1
+    n = len(raw)
+    while r < n:
+        row = raw.iloc[r]
+        stt_val = get(row, "stt")
+        try:
+            int(str(stt_val).strip())
+        except (ValueError, TypeError):
+            # dong "Tong theo ma CK: ..." / "Tong theo ngay:..." / dong tong ket cuoi file
+            # -> bo qua, KHONG dung vong lap vi du lieu giao dich con tiep tuc sau do.
+            r += 1
+            continue
+
+        so_tieu_khoan = _key_str(get(row, "so_tieu_khoan"))
+        if not so_tieu_khoan:
+            r += 1
+            continue
+
+        phi = _to_number(get(row, "phi_gia_tri")) + _to_number(get(row, "phi_ck"))
+        thue = _to_number(get(row, "thue_tncn")) + _to_number(get(row, "thue_quyen"))
+
+        records.append({
+            "source": "PBSV",
+            "ngay": _format_date_cell(get(row, "ngay")),
+            "so_hieu_lenh": _key_str(get(row, "so_hieu_lenh")),
+            "so_tieu_khoan": so_tieu_khoan,
+            "ten_khach_hang_raw": None,  # dinh dang nay khong co cot ten khach hang
+            "ma_ck": _norm_text(get(row, "ma_ck")) or None,
+            "loai_gd": _norm_text(get(row, "mua_ban")) or None,
+            "kl_dat": _to_number(get(row, "kl_dat")),
+            "kl_khop": _to_number(get(row, "kl_khop")),
+            "gia_khop": _to_number(get(row, "gia_khop")),
+            "tong_gia": _to_number(get(row, "gia_tri_khop")),
+            "pct_phi": _to_number(get(row, "pct_phi")),
+            "phi": phi,
+            "thue": thue,
+            "tong_thuan": _to_number(get(row, "thanh_tien")),
+            "ten_quan_ly_raw": None,  # PBSV luon lay ten Moi gioi tu danh sach khach hang
+            "ten_cong_ty": company_name,
+        })
+        r += 1
+
+    if not records:
+        warnings.append(
+            f"File PBSV input '{filename}' (định dạng 'Kết quả khớp lệnh') không có dòng giao dịch nào sau khi đọc."
+        )
+
+    return pd.DataFrame(records), warnings
+
+
 # ============================================================
 # 3) Danh sach khach hang (2 sheet: JB + PBSV)
 # ============================================================
@@ -671,12 +810,69 @@ def parse_customer_master(file, filename: str) -> tuple[pd.DataFrame, pd.DataFra
 # 4) Join + chuan hoa ve schema output
 # ============================================================
 
-def _join_source(df_norm: pd.DataFrame, master: pd.DataFrame, source: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Doi chieu du lieu giao dich (JB hoac PBSV) voi danh sach khach hang tuong ung.
-    Tra ve (output_rows_df, mismatch_rows_df).
+def _derive_custody_account(so_tieu_khoan: str, source: str) -> Optional[str]:
+    """Suy ra 'TÀI KHOẢN LƯU KÝ' tu 'SỐ TIỂU KHOẢN' theo quy tac rieng cho tung broker -
+    dung lam FALLBACK khi khong tim thay khop truc tiep theo SỐ TIỂU KHOẢN trong Master.
+    Tra ve None neu khong the suy ra mot cach chac chan (khong doan bua de tranh gan nham
+    khach hang/CTV cho giao dich).
+
+        - PBSV: bo phan duoi sau dau '.' cuoi cung (vd "123456.00" -> "123456"). Khong co
+          dau '.' -> giu nguyen ca chuoi.
+        - JB: bo 2 ky tu cuoi cua so tieu khoan (ma hau to nhu "MG"/"NM"/"M1"), sau do neu
+          4 ky tu dau cua phan con lai la "0001" (ma noi bo) -> thay bang "050C" (ma tai
+          khoan luu ky chuan, da doi chieu khop 100% voi Master JB hien co). Prefix khac
+          "0001" -> chua co quy tac xac nhan -> tra ve None (khong doan).
+        - Nguon khac (ngoai JB/PBSV, hien khong co trong he thong) -> copy nguyen so tieu
+          khoan lam tai khoan luu ky tam thoi.
     """
+    if not so_tieu_khoan:
+        return None
+    s = so_tieu_khoan.strip()
+    if not s:
+        return None
+
+    if source == "PBSV":
+        return s.rsplit(".", 1)[0].strip() if "." in s else s
+
+    if source == "JB":
+        if len(s) <= 2:
+            return None
+        core = s[:-2]
+        if core[:4] == "0001":
+            return "050C" + core[4:]
+        return None
+
+    return s
+
+
+def _build_custody_index(master: pd.DataFrame) -> dict:
+    """Xay dung index phu theo 'TÀI KHOẢN LƯU KÝ', dung de tra cuu fallback khi khop qua
+    _derive_custody_account(). Nhieu dong (nhieu tieu khoan) co the cung 1 tai khoan luu
+    ky - cac dong nay theo nguyen tac phai cung 1 khach hang/CTV nen chi can lay dong dau
+    tien gap duoc."""
+    idx: dict = {}
+    if master.empty or "TÀI KHOẢN LƯU KÝ" not in master.columns:
+        return idx
+    for _, row in master.iterrows():
+        k = _key_str(row["TÀI KHOẢN LƯU KÝ"])
+        if k and k not in idx:
+            idx[k] = row
+    return idx
+
+
+def _join_source(df_norm: pd.DataFrame, master: pd.DataFrame, source: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Doi chieu du lieu giao dich (JB hoac PBSV) voi danh sach khach hang tuong ung. Neu
+    khong khop truc tiep theo 'SỐ TIỂU KHOẢN', thu suy ra 'TÀI KHOẢN LƯU KÝ' tu so tieu
+    khoan (_derive_custody_account) roi khop lai theo tai khoan luu ky - fallback danh cho
+    cac dong ma Master khong liet ke dung tieu khoan giao dich nhung co liet ke tai khoan
+    luu ky qua 1 tieu khoan khac cua cung khach hang.
+    Tra ve (output_rows_df, mismatch_rows_df, match_stats).
+    """
+    match_stats = {"truc_tiep": 0, "suy_luan_tai_khoan_luu_ky": 0, "khong_khop": 0}
     if df_norm.empty:
-        return pd.DataFrame(columns=OUTPUT_COLUMNS), pd.DataFrame(columns=MISMATCH_COLUMNS)
+        return pd.DataFrame(columns=OUTPUT_COLUMNS), pd.DataFrame(columns=MISMATCH_COLUMNS), match_stats
+
+    custody_index = _build_custody_index(master)
 
     out_rows = []
     mismatch_rows = []
@@ -685,22 +881,45 @@ def _join_source(df_norm: pd.DataFrame, master: pd.DataFrame, source: str) -> tu
         key = row["so_tieu_khoan"]
         m = master.loc[key] if (key is not None and key in master.index) else None
         matched = m is not None
+        derived_custody = None
+
+        if matched:
+            match_stats["truc_tiep"] += 1
+        elif key:
+            derived_custody = _derive_custody_account(key, source)
+            if derived_custody:
+                m2 = custody_index.get(derived_custody)
+                if m2 is not None:
+                    m = m2
+                    matched = True
+                    match_stats["suy_luan_tai_khoan_luu_ky"] += 1
+
+        if not matched:
+            match_stats["khong_khop"] += 1
 
         raw_cust = row.get("ten_khach_hang_raw")
         raw_cust_fmt = format_customer_name(raw_cust) if raw_cust else ""
 
         if not matched:
+            if not key:
+                ly_do = "Thiếu số tiểu khoản để đối chiếu (kiểm tra 'Số tài khoản' ở đầu báo cáo PBSV)"
+            elif derived_custody:
+                ly_do = (
+                    f"Không tìm thấy trong danh sách khách hàng (đã thử suy ra tài khoản lưu ký "
+                    f"'{derived_custody}' từ số tiểu khoản nhưng cũng không khớp)"
+                )
+            else:
+                ly_do = "Không tìm thấy trong danh sách khách hàng (không suy ra được tài khoản lưu ký từ số tiểu khoản)"
             mismatch_rows.append({
                 "Nguồn": source,
                 "Số tiểu khoản tra cứu": key if key else "(rỗng)",
                 "Tên khách hàng (nếu có)": raw_cust_fmt,
-                "Lý do": "Không tìm thấy trong danh sách khách hàng"
-                if key else "Thiếu số tiểu khoản để đối chiếu (kiểm tra 'Số tài khoản' ở đầu báo cáo PBSV)",
+                "Lý do": ly_do,
             })
 
-        tai_khoan_luu_ky = m["TÀI KHOẢN LƯU KÝ"] if matched else UNMATCHED_LABEL
-        master_cust = m["TÊN KHÁCH HÀNG"] if matched else UNMATCHED_LABEL
-        master_cust_fmt = format_customer_name(master_cust) if (matched and pd.notna(master_cust)) else UNMATCHED_LABEL
+        tai_khoan_luu_ky = m["TÀI KHOẢN LƯU KÝ"] if matched else ""
+        master_cust = m["TÊN KHÁCH HÀNG"] if matched else ""
+        master_cust_fmt = format_customer_name(master_cust) if (matched and pd.notna(master_cust)) else ""
         ten_khach_hang = raw_cust_fmt or master_cust_fmt
 
         if source == "JB":
@@ -716,10 +935,10 @@ def _join_source(df_norm: pd.DataFrame, master: pd.DataFrame, source: str) -> tu
             elif matched:
                 ten_quan_ly = ""  # khach hang co that nhung khong co CTV duoc gan - khong phai loi khop
             else:
-                ten_quan_ly = UNMATCHED_LABEL
+                ten_quan_ly = ""
         else:
             # PBSV: dung ten Moi gioi, luon lay tu danh sach khach hang (input khong co san).
-            ten_quan_ly = _norm_text(m.get("TÊN MÔI GIỚI")) if matched else UNMATCHED_LABEL
+            ten_quan_ly = _norm_text(m.get("TÊN MÔI GIỚI")) if matched else ""
 
         out_rows.append({
             "Ngày": row.get("ngay"),
@@ -732,78 +951,143 @@ def _join_source(df_norm: pd.DataFrame, master: pd.DataFrame, source: str) -> tu
             "Khối lượng đặt": row.get("kl_dat"),
             "Khối lượng khớp": row.get("kl_khop"),
             "Giá khớp": row.get("gia_khop"),
-            "Tổng giá ": row.get("tong_gia"),
+            COL_TRUOC: row.get("tong_gia"),
             "% Phí": row.get("pct_phi"),
             "Phí": row.get("phi"),
             "Thuế": row.get("thue"),
-            "Tổng thuần": row.get("tong_thuan"),
+            COL_SAU: row.get("tong_thuan"),
             "Tên người quản lý": ten_quan_ly,
             "Tên Công ty": row.get("ten_cong_ty"),
         })
 
     out_df = pd.DataFrame(out_rows, columns=OUTPUT_COLUMNS)
     mismatch_df = pd.DataFrame(mismatch_rows, columns=MISMATCH_COLUMNS)
-    return out_df, mismatch_df
+    return out_df, mismatch_df, match_stats
 
 
-def _fill_derived_fields(df: pd.DataFrame) -> pd.DataFrame:
-    """Tinh 'Tong thuan' va '% Phi' cho cac dong con thieu (chu yeu la PBSV), theo cong thuc chuan:
-        Tong thuan (Ban) = Tong gia - Phi - Thue
-        Tong thuan (Mua) = Tong gia + Phi + Thue
-        % Phi = Phi / Tong gia * 100
+# Sai so cho phep khi doi chieu COL_SAU voi cong thuc chuan (VND) - chi de bo qua
+# sai so lam tron, KHONG de che giau chenh lech that su (vd 2x Phi+Thue do quy uoc
+# netting nguoc chieu cua du lieu nguon).
+_VALIDATION_TOLERANCE = 1.0
+
+# So dong loi toi da liet ke chi tiet trong 1 canh bao, tranh spam khi loi hang loat.
+_VALIDATION_MAX_LOGGED = 20
+
+
+def _fill_derived_fields(df: pd.DataFrame, warnings: list[str]) -> pd.DataFrame:
+    """Tinh COL_SAU va '% Phi' cho TOAN BO dong, theo dung nghiep vu rieng cho tung chieu
+    Mua/Ban (nguoi mua tra them phi; nguoi ban bi tru ca phi lan thue TNCN truoc khi
+    nhan tien):
+
+        Mua: COL_SAU ("Tổng thuần") = COL_TRUOC ("Tổng giá ") + Phí
+        Bán: COL_SAU ("Tổng thuần") = COL_TRUOC ("Tổng giá ") − Phí − Thuế
+
+    Ap dung THONG NHAT cho MOI nguon (JB/PBSV). Dong hiem gap khong xac dinh duoc
+    Mua/Ban (xem parse_jb_input) dung cong thuc du phong: + Phi + Thue.
+
+    Gia tri co san tu nguon (JB: "Tổng thuần_Mua/Bán"; PBSV dinh dang moi: "Thành tiền")
+    duoc dung de DOI CHIEU/CANH BAO neu lech so voi cong thuc nghiep vu tren, khong dung
+    truc tiep lam ket qua cuoi cung.
+
     Chuan hoa tat ca cot so thanh kieu du lieu so (float64) thay vi chuoi.
     """
     df = df.copy()
 
     # Ep tat ca cac cot so thanh kieu so (numeric)
-    num_cols = ["Khối lượng đặt", "Khối lượng khớp", "Giá khớp", "Tổng giá ", "% Phí", "Phí", "Thuế", "Tổng thuần"]
+    num_cols = ["Khối lượng đặt", "Khối lượng khớp", "Giá khớp", COL_TRUOC, "% Phí", "Phí", "Thuế", COL_SAU]
     for col in num_cols:
         if col in df.columns:
             if df[col].dtype == object:
                 df[col] = df[col].apply(_to_number)
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
-    tong_gia = df["Tổng giá "]
+    tong_truoc = df[COL_TRUOC]
     phi = df["Phí"]
     thue = df["Thuế"]
-    tong_thuan = df["Tổng thuần"]
     pct_phi = df["% Phí"]
+    sau_nguon = df[COL_SAU]  # gia tri COL_SAU co san tu nguon (chi JB co, PBSV luon = 0.0)
+    loai_gd = df["Giao dịch (Mua/Bán)"]
 
-    is_ban = df["Giao dịch (Mua/Bán)"] == "Bán"
-    is_mua = df["Giao dịch (Mua/Bán)"] == "Mua"
+    is_mua = loai_gd == "Mua"
+    is_ban = loai_gd == "Bán"
+    sau_chuan = np.select(
+        [is_mua, is_ban],
+        [tong_truoc + phi, tong_truoc - phi - thue],
+        default=(tong_truoc + phi + thue),  # du phong cho dong khong xac dinh Mua/Ban
+    )
+    sau_chuan = pd.Series(sau_chuan, index=df.index)
 
-    need_tt = (tong_thuan == 0.0) | (tong_thuan.isna())
-    tong_thuan = tong_thuan.where(~(need_tt & is_ban), tong_gia - phi - thue)
-    tong_thuan = tong_thuan.where(~(need_tt & is_mua), tong_gia + phi + thue)
+    # ── Validate: doi chieu gia tri co san tu nguon voi cong thuc nghiep vu tren.
+    # Neu lech vuot sai so lam tron -> log lai tung dong de de truy vet, KHONG am
+    # tham bo qua (van uu tien cong thuc nghiep vu cho ket qua cuoi cung ben duoi).
+    co_gia_tri_nguon = sau_nguon != 0.0
+    lech = (sau_nguon - sau_chuan).abs()
+    mismatch_mask = co_gia_tri_nguon & (lech > _VALIDATION_TOLERANCE)
+
+    n_mismatch = int(mismatch_mask.sum())
+    if n_mismatch:
+        msg_header = (
+            f"⚠️ Validate '{COL_SAU}': phát hiện {n_mismatch} dòng có giá trị lấy từ file nguồn "
+            f"KHÁC với công thức nghiệp vụ (Mua: '{COL_TRUOC}' + Phí; Bán: '{COL_TRUOC}' − Phí − Thuế) "
+            "— đã dùng công thức nghiệp vụ cho kết quả cuối cùng, chi tiết các dòng lệch:"
+        )
+        warnings.append(msg_header)
+        mismatch_idx = df.index[mismatch_mask]
+        for i, idx in enumerate(mismatch_idx):
+            if i >= _VALIDATION_MAX_LOGGED:
+                warnings.append(f"  ... và {n_mismatch - _VALIDATION_MAX_LOGGED} dòng khác.")
+                break
+            row = df.loc[idx]
+            warnings.append(
+                f"  - SHL {row.get('Số hiệu lệnh') or '(trống)'} | "
+                f"Tiểu khoản {row.get('Số tiểu khoản') or '(trống)'} | "
+                f"KH {row.get('Tên khách hàng') or '(trống)'} | "
+                f"Nguồn {row.get('Tên Công ty') or '(trống)'}: "
+                f"giá trị nguồn = {sau_nguon.loc[idx]:,.2f}, "
+                f"công thức nghiệp vụ = {sau_chuan.loc[idx]:,.2f}, "
+                f"chênh lệch = {(sau_nguon.loc[idx] - sau_chuan.loc[idx]):,.2f}."
+            )
+
+    df[COL_SAU] = sau_chuan
 
     need_pf = (pct_phi == 0.0) | (pct_phi.isna())
-    safe_div = tong_gia.replace(0, np.nan)
+    safe_div = tong_truoc.replace(0, np.nan)
     pct_phi = pct_phi.where(~need_pf, (phi / safe_div * 100))
-
-    df["Tổng thuần"] = tong_thuan
     df["% Phí"] = pct_phi.round(4)
     return df
-
-
 
 def build_output(
     df_jb_norm: pd.DataFrame,
     df_pb_norm: pd.DataFrame,
     master_jb: pd.DataFrame,
     master_pb: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    warnings: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """Gop du lieu JB + PBSV da chuan hoa, join voi danh sach khach hang, tra ve
-    (output_df, mismatch_df) theo dung cau truc chuan.
+    (output_df, mismatch_df, map_stats) theo dung cau truc chuan.
+
+    `warnings` duoc bo sung them cac canh bao validate COL_SAU (xem _fill_derived_fields)
+    va 1 dong tom tat ket qua doi chieu tai khoan luu ky (truc tiep / suy luan / khong
+    khop) theo tung nguon, de nguoi dung kiem chung (xem _join_source).
     """
-    out_jb, mis_jb = _join_source(df_jb_norm, master_jb, "JB")
-    out_pb, mis_pb = _join_source(df_pb_norm, master_pb, "PBSV")
+    out_jb, mis_jb, stats_jb = _join_source(df_jb_norm, master_jb, "JB")
+    out_pb, mis_pb, stats_pb = _join_source(df_pb_norm, master_pb, "PBSV")
 
     output_df = pd.concat([out_jb, out_pb], ignore_index=True)
-    output_df = _fill_derived_fields(output_df)
+    output_df = _fill_derived_fields(output_df, warnings)
 
     mismatch_df = pd.concat([mis_jb, mis_pb], ignore_index=True)
-    return output_df, mismatch_df
 
+    map_stats = {"JB": stats_jb, "PBSV": stats_pb}
+    for src, st in map_stats.items():
+        if st["truc_tiep"] or st["suy_luan_tai_khoan_luu_ky"] or st["khong_khop"]:
+            warnings.append(
+                f"ℹ️ Đối chiếu tài khoản lưu ký nguồn {src}: {st['truc_tiep']} khớp trực tiếp theo "
+                f"số tiểu khoản, {st['suy_luan_tai_khoan_luu_ky']} khớp qua suy luận tài khoản lưu ký "
+                f"từ số tiểu khoản, {st['khong_khop']} không khớp được."
+            )
+
+    return output_df, mismatch_df, map_stats
 
 # ============================================================
 # 5) Ham dieu phoi tong (goi tu Streamlit app) - ho tro nhieu file/o input
@@ -823,7 +1107,6 @@ def _concat_master(frames: list[pd.DataFrame], label: str, warnings: list[str]) 
         )
         combined = combined[~dup]
     return combined
-
 
 def process_files(jb_items, pbsv_items, master_items):
     """Ham tong hop: doc nhieu file cho moi loai dau vao (JB / PBSV / DS khach hang),
@@ -918,7 +1201,7 @@ def process_files(jb_items, pbsv_items, master_items):
     df_pb = pd.concat(df_pb_frames, ignore_index=True) if df_pb_frames else pd.DataFrame()
 
     try:
-        output_df, mismatch_df = build_output(df_jb, df_pb, master_jb, master_pb)
+        output_df, mismatch_df, map_stats = build_output(df_jb, df_pb, master_jb, master_pb, warnings)
     except Exception as e:  # noqa: BLE001
         errors.append(f"Lỗi không xác định khi gộp/đối chiếu dữ liệu: {e}")
         return {
@@ -937,6 +1220,7 @@ def process_files(jb_items, pbsv_items, master_items):
         "so_gd_pbsv": len(df_pb),
         "tong_so_gd": len(output_df),
         "so_dong_khong_khop": len(mismatch_df),
+        "map_stats": map_stats,
     }
 
     return {

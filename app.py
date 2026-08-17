@@ -242,7 +242,10 @@ def _to_tsv_string(df: pd.DataFrame, use_vn_decimal: bool = True, include_header
     Mặc định include_header=False để loại bỏ dòng tiêu đề khi copy.
     """
     df_clean = df.copy()
-    num_cols = ["Khối lượng đặt", "Khối lượng khớp", "Giá khớp", "Tổng giá ", "% Phí", "Phí", "Thuế", "Tổng thuần"]
+    num_cols = [
+        "Khối lượng đặt", "Khối lượng khớp", "Giá khớp",
+        mp.COL_TRUOC, "% Phí", "Phí", "Thuế", mp.COL_SAU,
+    ]
     for col in num_cols:
         if col in df_clean.columns:
             s_num = pd.to_numeric(df_clean[col], errors="coerce").fillna(0.0)

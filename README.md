@@ -13,7 +13,7 @@
 2. **Chuẩn Hóa & Nhận Diện Mã Công Ty Rút Gọn**:
    - Tự động nhận diện và chuyển đổi cột `Tên Công ty` sang mã rút gọn chuẩn: **`JB`** hoặc **`PBSV`**.
    - Lọc chính xác các giao dịch ở trạng thái *"Hoàn thành"* đối với dữ liệu PBSV.
-   - Tự động tính toán các trường derivied như `% Phí`, `Tổng thuần` nếu thiếu.
+   - Tự động tính toán các trường derived như `% Phí` nếu thiếu, và luôn tính `Tổng giá trị giao dịch (sau phí + thuế)` theo đúng 1 công thức chuẩn: `= Tổng giá trị giao dịch (trước phí + thuế) + Phí + Thuế` cho mọi dòng (không phân biệt nguồn JB/PBSV hay Mua/Bán).
 
 3. **Giao Diện Dashboard Hiện Đại & Tùy Biến Chuyên Sâu**:
    - **Thanh Sidebar điều khiển**: Gom gọn khu vực tải file và nút thao tác giúp không gian làm việc chính rộng rãi.
