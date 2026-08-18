@@ -37,6 +37,10 @@ import pandas as pd
 COL_TRUOC = "Tổng giá "
 COL_SAU = "Tổng thuần"
 
+# Gia tri mac dinh dien vao khi khong tra cuu duoc "Nhóm khách hàng" / "Phân loại khách
+# hàng" tu danh sach khach hang (o trong, None, NaN, hoac chi chua khoang trang).
+DEFAULT_UNKNOWN = "Không xác định"
+
 # ============================================================
 # Cau truc output chuan (khop file mau Output.xlsx do user cung cap)
 # Luu y: cot "Tai khoan luu ky " co dau cach cuoi la co chu y de khop chinh xac
@@ -60,6 +64,8 @@ OUTPUT_COLUMNS = [
     COL_SAU,
     "Tên người quản lý",
     "Tên Công ty",
+    "Nhóm khách hàng",
+    "Phân loại khách hàng",
 ]
 
 MISMATCH_COLUMNS = [
@@ -868,7 +874,7 @@ def _join_source(df_norm: pd.DataFrame, master: pd.DataFrame, source: str) -> tu
     luu ky qua 1 tieu khoan khac cua cung khach hang.
     Tra ve (output_rows_df, mismatch_rows_df, match_stats).
     """
-    match_stats = {"truc_tiep": 0, "suy_luan_tai_khoan_luu_ky": 0, "khong_khop": 0}
+    match_stats = {"truc_tiep": 0, "suy_luan_tai_khoan_luu_ky": 0, "khong_khop": 0, "xoa_thieu_ten": 0}
     if df_norm.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS), pd.DataFrame(columns=MISMATCH_COLUMNS), match_stats
 
@@ -940,6 +946,35 @@ def _join_source(df_norm: pd.DataFrame, master: pd.DataFrame, source: str) -> tu
             # PBSV: dung ten Moi gioi, luon lay tu danh sach khach hang (input khong co san).
             ten_quan_ly = _norm_text(m.get("TÊN MÔI GIỚI")) if matched else ""
 
+        # "Nhóm khách hàng" / "Phân loại khách hàng": luon lay tu danh sach khach hang
+        # (Master). O trong/None/NaN/chi co khoang trang, hoac khong khop duoc khach hang
+        # -> dien mac dinh DEFAULT_UNKNOWN thay vi de trong o.
+        nhom_kh = _norm_text(m.get("NHÓM KHÁCH HÀNG")) if (matched and "NHÓM KHÁCH HÀNG" in master.columns) else ""
+        phan_loai_kh = (
+            _norm_text(m.get("PHÂN LOẠI KHÁCH HÀNG"))
+            if (matched and "PHÂN LOẠI KHÁCH HÀNG" in master.columns)
+            else ""
+        )
+        nhom_kh = nhom_kh or DEFAULT_UNKNOWN
+        phan_loai_kh = phan_loai_kh or DEFAULT_UNKNOWN
+
+        # Theo yeu cau nghiep vu: khong de trong o "Tên khách hàng" trong bang ket qua
+        # chinh - neu khong tra cuu duoc ten khach hang (du da khop tieu khoan hay chua)
+        # thi XOA CA DONG khoi bang chinh, chi giu vet lai trong mismatch_df de nguoi
+        # dung kiem chung. Rieng "Tên người quản lý" (Moi gioi/CTV) thieu thi VAN GIU
+        # dong, chi de trong o do (khach hang co that nhung khong co Moi gioi/CTV duoc
+        # gan khong phai loi can xoa dong).
+        if not ten_khach_hang:
+            match_stats["xoa_thieu_ten"] += 1
+            if matched:
+                mismatch_rows.append({
+                    "Nguồn": source,
+                    "Số tiểu khoản tra cứu": key if key else "(rỗng)",
+                    "Tên khách hàng (nếu có)": raw_cust_fmt,
+                    "Lý do": "Đã khớp tiểu khoản nhưng thiếu Tên khách hàng trong danh sách khách hàng — đã xóa dòng khỏi bảng kết quả",
+                })
+            continue
+
         out_rows.append({
             "Ngày": row.get("ngay"),
             "Số hiệu lệnh": row.get("so_hieu_lenh"),
@@ -958,6 +993,8 @@ def _join_source(df_norm: pd.DataFrame, master: pd.DataFrame, source: str) -> tu
             COL_SAU: row.get("tong_thuan"),
             "Tên người quản lý": ten_quan_ly,
             "Tên Công ty": row.get("ten_cong_ty"),
+            "Nhóm khách hàng": nhom_kh,
+            "Phân loại khách hàng": phan_loai_kh,
         })
 
     out_df = pd.DataFrame(out_rows, columns=OUTPUT_COLUMNS)
@@ -1085,6 +1122,11 @@ def build_output(
                 f"ℹ️ Đối chiếu tài khoản lưu ký nguồn {src}: {st['truc_tiep']} khớp trực tiếp theo "
                 f"số tiểu khoản, {st['suy_luan_tai_khoan_luu_ky']} khớp qua suy luận tài khoản lưu ký "
                 f"từ số tiểu khoản, {st['khong_khop']} không khớp được."
+            )
+        if st["xoa_thieu_ten"]:
+            warnings.append(
+                f"🗑️ Nguồn {src}: đã xóa {st['xoa_thieu_ten']} dòng khỏi bảng kết quả do không tra "
+                "cứu được Tên khách hàng — xem chi tiết ở danh sách dòng không khớp."
             )
 
     return output_df, mismatch_df, map_stats

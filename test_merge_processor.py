@@ -133,7 +133,10 @@ class TestCustodyAccountFallback(unittest.TestCase):
         df_norm = _tx_row(source="PBSV", so_tieu_khoan="029C030987.05", ten_cong_ty="PBSV")
         out_df, mismatch_df, stats = mp._join_source(df_norm, master_pb, "PBSV")
 
-        self.assertEqual(stats, {"truc_tiep": 0, "suy_luan_tai_khoan_luu_ky": 1, "khong_khop": 0})
+        self.assertEqual(
+            stats,
+            {"truc_tiep": 0, "suy_luan_tai_khoan_luu_ky": 1, "khong_khop": 0, "xoa_thieu_ten": 0},
+        )
         self.assertEqual(out_df.iloc[0]["Tài khoản lưu ký "], "029C030987")
         self.assertEqual(out_df.iloc[0]["Tên khách hàng"], "Bùi Thị Phương Ngân")
         self.assertEqual(out_df.iloc[0]["Tên người quản lý"], "Cao Ngọc Toàn")
@@ -152,7 +155,7 @@ class TestCustodyAccountFallback(unittest.TestCase):
         self.assertEqual(out_df.iloc[0]["Tài khoản lưu ký "], "050C986886")
         self.assertEqual(out_df.iloc[0]["Tên người quản lý"], "Phạm Như Ngọc")
 
-    def test_still_unmatched_after_derivation_stays_blank_and_reports_derived_value(self):
+    def test_still_unmatched_after_derivation_is_dropped_from_output_and_reports_derived_value(self):
         master_pb = _build_master_df([
             {"TÀI KHOẢN LƯU KÝ": "029C999999", "SỐ TIỂU KHOẢN": "029C999999.00",
              "TÊN KHÁCH HÀNG": "Ai Do", "TÊN MÔI GIỚI": "Ai Khac"},
@@ -161,8 +164,90 @@ class TestCustodyAccountFallback(unittest.TestCase):
         out_df, mismatch_df, stats = mp._join_source(df_norm, master_pb, "PBSV")
 
         self.assertEqual(stats["khong_khop"], 1)
-        self.assertEqual(out_df.iloc[0]["Tên khách hàng"], "")
+        self.assertEqual(stats["xoa_thieu_ten"], 1)
+        self.assertEqual(len(out_df), 0)  # khong tra cuu duoc ten -> xoa ca dong khoi bang chinh
         self.assertIn("029C111111", mismatch_df.iloc[0]["Lý do"])
+
+    def test_matched_but_missing_broker_name_is_kept_with_blank_cell(self):
+        """Khach hang co that (khop tieu khoan) nhung Master khong co Ten Moi gioi ->
+        VAN GIU dong trong bang chinh, chi de trong o "Tên người quản lý" (khong xoa
+        dong, khac voi truong hop thieu Ten khach hang)."""
+        master_pb = _build_master_df([
+            {"TÀI KHOẢN LƯU KÝ": "029C222222", "SỐ TIỂU KHOẢN": "029C222222.00",
+             "TÊN KHÁCH HÀNG": "Nguyen Van A", "TÊN MÔI GIỚI": None},
+        ])
+        df_norm = _tx_row(source="PBSV", so_tieu_khoan="029C222222.00", ten_cong_ty="PBSV")
+        out_df, mismatch_df, stats = mp._join_source(df_norm, master_pb, "PBSV")
+
+        self.assertEqual(stats["truc_tiep"], 1)
+        self.assertEqual(stats["xoa_thieu_ten"], 0)
+        self.assertEqual(len(out_df), 1)
+        self.assertEqual(out_df.iloc[0]["Tên khách hàng"], "Nguyen Van A")
+        self.assertEqual(out_df.iloc[0]["Tên người quản lý"], "")
+        self.assertEqual(len(mismatch_df), 0)
+
+
+class TestCustomerGroupAndClassification(unittest.TestCase):
+    """'Nhóm khách hàng' / 'Phân loại khách hàng' phai lay tu danh sach khach hang, va
+    dien mac dinh DEFAULT_UNKNOWN ("Không xác định") khi trong/None/NaN/chi co khoang
+    trang, hoac khong khop duoc khach hang - khong duoc de trong o."""
+
+    def test_filled_from_master_when_present(self):
+        master_pb = _build_master_df([
+            {"TÀI KHOẢN LƯU KÝ": "029C333333", "SỐ TIỂU KHOẢN": "029C333333.00",
+             "TÊN KHÁCH HÀNG": "Nguyen Van B", "TÊN MÔI GIỚI": "Cao Ngọc Toàn",
+             "NHÓM KHÁCH HÀNG": "VIX0", "PHÂN LOẠI KHÁCH HÀNG": "DEAL"},
+        ])
+        df_norm = _tx_row(source="PBSV", so_tieu_khoan="029C333333.00", ten_cong_ty="PBSV")
+        out_df, _, _ = mp._join_source(df_norm, master_pb, "PBSV")
+
+        self.assertEqual(out_df.iloc[0]["Nhóm khách hàng"], "VIX0")
+        self.assertEqual(out_df.iloc[0]["Phân loại khách hàng"], "DEAL")
+
+    def test_blank_or_missing_defaults_to_unknown(self):
+        master_pb = _build_master_df([
+            {"TÀI KHOẢN LƯU KÝ": "029C444444", "SỐ TIỂU KHOẢN": "029C444444.00",
+             "TÊN KHÁCH HÀNG": "Nguyen Van C", "TÊN MÔI GIỚI": "Cao Ngọc Toàn",
+             "NHÓM KHÁCH HÀNG": "   ", "PHÂN LOẠI KHÁCH HÀNG": None},
+        ])
+        df_norm = _tx_row(source="PBSV", so_tieu_khoan="029C444444.00", ten_cong_ty="PBSV")
+        out_df, _, _ = mp._join_source(df_norm, master_pb, "PBSV")
+
+        self.assertEqual(out_df.iloc[0]["Nhóm khách hàng"], mp.DEFAULT_UNKNOWN)
+        self.assertEqual(out_df.iloc[0]["Phân loại khách hàng"], mp.DEFAULT_UNKNOWN)
+
+    def test_missing_columns_in_master_default_to_unknown(self):
+        """Sheet Master khong co san 2 cot nay (vd sheet JB cu) -> khong duoc crash,
+        van phai dien mac dinh."""
+        master_jb = _build_master_df([
+            {"TÀI KHOẢN LƯU KÝ": "050C986886", "SỐ TIỂU KHOẢN": "0001986886MG",
+             "TÊN KHÁCH HÀNG": "CÔNG TY TNHH KH INVEST", "TÊN MÔI GIỚI": "Phạm Thị Thu Hằng"},
+        ])
+        df_norm = _tx_row(source="JB", so_tieu_khoan="0001986886MG", ten_cong_ty="JB")
+        out_df, _, _ = mp._join_source(df_norm, master_jb, "JB")
+
+        self.assertEqual(out_df.iloc[0]["Nhóm khách hàng"], mp.DEFAULT_UNKNOWN)
+        self.assertEqual(out_df.iloc[0]["Phân loại khách hàng"], mp.DEFAULT_UNKNOWN)
+
+    def test_unmatched_customer_defaults_to_unknown(self):
+        """Khong khop duoc khach hang trong Master, nhung dong van duoc giu lai (vi JB co
+        san Ten khach hang/CTV tren chinh dong giao dich) -> Nhom/Phan loai van phai co
+        gia tri mac dinh, khong de trong."""
+        master_jb = _build_master_df([
+            {"TÀI KHOẢN LƯU KÝ": "050C999999", "SỐ TIỂU KHOẢN": "0001999999MG",
+             "TÊN KHÁCH HÀNG": "Ai Do", "TÊN MÔI GIỚI": "Ai Khac",
+             "NHÓM KHÁCH HÀNG": "X", "PHÂN LOẠI KHÁCH HÀNG": "Y"},
+        ])
+        df_norm = _tx_row(
+            source="JB", so_tieu_khoan="0001111111MG", ten_cong_ty="JB",
+            ten_khach_hang_raw="Khach Le", ten_quan_ly_raw="CTV La",
+        )
+        out_df, mismatch_df, stats = mp._join_source(df_norm, master_jb, "JB")
+
+        self.assertEqual(stats["khong_khop"], 1)
+        self.assertEqual(len(out_df), 1)  # khong bi xoa vi da co Ten khach hang tu raw
+        self.assertEqual(out_df.iloc[0]["Nhóm khách hàng"], mp.DEFAULT_UNKNOWN)
+        self.assertEqual(out_df.iloc[0]["Phân loại khách hàng"], mp.DEFAULT_UNKNOWN)
 
 
 if __name__ == "__main__":
